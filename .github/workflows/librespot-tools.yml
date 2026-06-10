@@ -17,10 +17,7 @@ jobs:
           - os: windows-latest
             artifact: librespot-windows-x64
             ext: ".exe"
-          - os: macos-13          # x64 — Intel Mac
-            artifact: librespot-macos-x64
-            ext: ""
-          - os: macos-latest      # arm64 — Apple Silicon
+          - os: macos-latest
             artifact: librespot-macos-arm64
             ext: ""
 
@@ -74,7 +71,6 @@ jobs:
             --prerelease \
             librespot-linux-x64 \
             librespot-windows-x64.exe \
-            librespot-macos-x64 \
             librespot-macos-arm64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
