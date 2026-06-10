@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+    <name>Spotify Wii U</name>
+    <coder>Nico Christmann</coder>
+    <version>0.1.0</version>
+    <release_date>20260610000000</release_date>
+    <short_description>Unofficial Spotify Connect client for Nintendo Wii U</short_description>
+    <long_description>
+        An unofficial Spotify Connect client for the Nintendo Wii U (Aroma homebrew).
+        Requires a Spotify Premium account.
+        Not affiliated with or endorsed by Spotify AB.
+
+        Features:
+        - Spotify Connect — control playback from any Spotify app on your phone or PC
+        - Full playlist context — skips and auto-advance work across entire playlists
+        - Now Playing screen with album art, progress bar, and track info
+        - Shuffle and repeat control (toggle on device or from any Spotify app)
+        - Audio Crystalizer effect with adjustable strength
+        - Spectrum visualizer
+        - Supports GamePad, Wii Remote, and Pro Controller
+
+        GamePad controls:
+        - Plus / Minus: Volume up / down
+        - R / L: Next / Previous track
+        - ZR / ZL: Seek forward / back 5 seconds
+        - A: Play / Pause
+        - X: Toggle shuffle
+        - Y: Toggle repeat
+        - D-Pad Up / Down: Crystalizer on / off
+        - D-Pad Left / Right: Crystalizer strength
+        - B: Show / hide controls overlay
+
+        Setup:
+        1. Install the Aroma homebrew environment on your Wii U
+        2. Get credentials using tools/make_creds.py (see README for instructions)
+        3. Copy spotify_saved_creds.bin to the root of the Wii U SD card
+        4. Launch from the Aroma Homebrew Launcher
+        5. Open Spotify on any device, select "Wii U" as your playback device
+    </long_description>
+</app>
