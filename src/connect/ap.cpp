@@ -377,7 +377,6 @@ bool AP::recv_exact(uint8_t *buf, size_t n) {
                     int fl = fcntl(fd_, F_GETFL, 0);
                     if (fl >= 0) fcntl(fd_, F_SETFL, fl | O_NONBLOCK);
                     ssize_t r = ::recv(fd_, buf, n, 0);
-                    int er = errno;
                     if (fl >= 0) fcntl(fd_, F_SETFL, fl);
                     if (r > 0) {
                         buf += (size_t)r; n -= (size_t)r;
