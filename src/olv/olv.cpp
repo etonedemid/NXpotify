@@ -76,19 +76,21 @@ static FnCtor            s_fn_ctor_topic       = nullptr;
 static FnDLSetSearchKey  s_fn_dl_set_search    = nullptr;
 
 // nn::olv::UploadPostDataByPostApp — interactive post creation applet
-using FnSetWork      = void    (*)(void *, uint8_t *, uint32_t);
-using FnSetBodyText  = void    (*)(void *, const uint16_t *);  // wchar_t* = uint16_t* on Wii U
-using FnSetFlags     = void    (*)(void *, uint32_t);
-using FnSetTopicTag  = void    (*)(void *, const uint16_t *);  // UTF-16 topic label
-using FnSetSearchKey = void    (*)(void *, const uint16_t *);  // UTF-16 search key
-using FnUploadPost   = int32_t (*)(const void *);
-static FnCtor         s_fn_ctor_upload  = nullptr;
-static FnSetWork      s_fn_set_work     = nullptr;
-static FnSetBodyText  s_fn_set_body     = nullptr;
-static FnSetFlags     s_fn_set_flags    = nullptr;
-static FnSetTopicTag  s_fn_set_topic    = nullptr;
-static FnSetSearchKey s_fn_set_search   = nullptr;
-static FnUploadPost   s_fn_upload_post  = nullptr;
+using FnSetWork        = void    (*)(void *, uint8_t *, uint32_t);
+using FnSetBodyText    = void    (*)(void *, const uint16_t *);  // wchar_t* = uint16_t* on Wii U
+using FnSetFlags       = void    (*)(void *, uint32_t);
+using FnSetTopicTag    = void    (*)(void *, const uint16_t *);  // UTF-16 topic label
+using FnSetSearchKey   = void    (*)(void *, const uint16_t *);  // UTF-16 search key
+using FnSetCommunityId = void    (*)(void *, uint32_t);
+using FnUploadPost     = int32_t (*)(const void *);
+static FnCtor          s_fn_ctor_upload    = nullptr;
+static FnSetWork       s_fn_set_work       = nullptr;
+static FnSetBodyText   s_fn_set_body       = nullptr;
+static FnSetFlags      s_fn_set_flags      = nullptr;
+static FnSetTopicTag   s_fn_set_topic      = nullptr;
+static FnSetSearchKey  s_fn_set_search     = nullptr;
+static FnSetCommunityId s_fn_set_community = nullptr;
+static FnUploadPost    s_fn_upload_post    = nullptr;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -230,16 +232,24 @@ bool init() {
             "SetSearchKey__Q3_2nn3olv28UploadPostDataByPostAppParamFPCw",
             reinterpret_cast<void **>(&s_fn_set_search));
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+        "SetCommunityId__Q3_2nn3olv15UploadParamBaseFUi",
+        reinterpret_cast<void **>(&s_fn_set_community));
+    if (!s_fn_set_community)
+        OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+            "SetCommunityId__Q3_2nn3olv28UploadPostDataByPostAppParamFUi",
+            reinterpret_cast<void **>(&s_fn_set_community));
+    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "UploadPostDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv28UploadPostDataByPostAppParam",
         reinterpret_cast<void **>(&s_fn_upload_post));
-    WHBLogPrintf("olv: post applet ctor=%s work=%s body=%s flags=%s topic=%s search=%s upload=%s",
-                 s_fn_ctor_upload ? "ok" : "missing",
-                 s_fn_set_work    ? "ok" : "missing",
-                 s_fn_set_body    ? "ok" : "missing",
-                 s_fn_set_flags   ? "ok" : "missing",
-                 s_fn_set_topic   ? "ok" : "missing",
-                 s_fn_set_search  ? "ok" : "missing",
-                 s_fn_upload_post ? "ok" : "missing");
+    WHBLogPrintf("olv: post applet ctor=%s work=%s body=%s flags=%s topic=%s search=%s community=%s upload=%s",
+                 s_fn_ctor_upload    ? "ok" : "missing",
+                 s_fn_set_work       ? "ok" : "missing",
+                 s_fn_set_body       ? "ok" : "missing",
+                 s_fn_set_flags      ? "ok" : "missing",
+                 s_fn_set_topic      ? "ok" : "missing",
+                 s_fn_set_search     ? "ok" : "missing",
+                 s_fn_set_community  ? "ok" : "missing",
+                 s_fn_upload_post    ? "ok" : "missing");
 
     // Initialize the network/SSL/account stack before calling nn_olv::Initialize.
     // Must come after the RPL load — calling these on a background thread before
@@ -476,6 +486,8 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
     memset(s_upload_param, 0, sizeof(s_upload_param));
     s_fn_ctor_upload(s_upload_param);
     s_fn_set_work(s_upload_param, s_upload_work, sizeof(s_upload_work));
+    if (s_fn_set_community)
+        s_fn_set_community(s_upload_param, COMMUNITY_ID);
 
     // Convert body text to UTF-16 (Wii U wchar_t is 2 bytes; 200-char Miiverse limit).
     auto body16 = utf8_to_utf16(body_utf8, 200);
