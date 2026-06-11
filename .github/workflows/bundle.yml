@@ -29,11 +29,6 @@ jobs:
             archive: spotify-wiiu-setup-macos-arm64.tar.gz
             ext: ""
 
-          - os: macos-13
-            setup_target: x86_64-apple-darwin
-            archive: spotify-wiiu-setup-macos-x64.tar.gz
-            ext: ""
-
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -114,8 +109,7 @@ jobs:
           See the [README](../../blob/main/README.md#1-get-credentials) for full details." \
             spotify-wiiu-setup-linux-x64.tar.gz \
             spotify-wiiu-setup-windows-x64.zip \
-            spotify-wiiu-setup-macos-arm64.tar.gz \
-            spotify-wiiu-setup-macos-x64.tar.gz
+            spotify-wiiu-setup-macos-arm64.tar.gz
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

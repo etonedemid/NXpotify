@@ -71,7 +71,6 @@ Grab the bundle for your platform from the [latest bundle release](../../release
 | Windows | `spotify-wiiu-setup-windows-x64.zip` |
 | Linux | `spotify-wiiu-setup-linux-x64.tar.gz` |
 | macOS (Apple Silicon) | `spotify-wiiu-setup-macos-arm64.tar.gz` |
-| macOS (Intel) | `spotify-wiiu-setup-macos-x64.tar.gz` |
 
 Extract the archive, then run the setup tool:
 

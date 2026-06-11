@@ -27,11 +27,6 @@ jobs:
             artifact: spotify-wiiu-setup-macos-arm64
             ext: ""
 
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: spotify-wiiu-setup-macos-x64
-            ext: ""
-
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -94,8 +89,7 @@ jobs:
           See the [README](../../blob/main/README.md#1-get-credentials) for the full setup guide." \
             spotify-wiiu-setup-linux-x64 \
             spotify-wiiu-setup-windows-x64.exe \
-            spotify-wiiu-setup-macos-arm64 \
-            spotify-wiiu-setup-macos-x64
+            spotify-wiiu-setup-macos-arm64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
