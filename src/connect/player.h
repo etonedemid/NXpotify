@@ -87,6 +87,7 @@ private:
     std::mutex            olv_mu_;
     std::thread           olv_init_thread_;
     std::thread           olv_fetch_thread_;
+    std::atomic<bool>     olv_fetching_{false};
     void olv_show_current();        // push current post to display (call under olv_mu_)
     void olv_fetch(uint32_t cid);   // blocking fetch, runs on olv_fetch_thread_
 

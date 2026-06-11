@@ -202,17 +202,30 @@ void Player::run() {
             uint64_t now = OSGetSystemTick();
             if (now - olv_last_advance_ >= OSSecondsToTicks(5)) {
                 std::lock_guard<std::mutex> lk(olv_mu_);
-                if (olv_card_visible_ && !olv_posts_.empty()) {
+                if (olv_card_visible_ && !olv_fetching_) {
                     olv_last_advance_ = now;
-                    olv_post_idx_ = (olv_post_idx_ + 1) % olv_posts_.size();
-                    if (olv_post_idx_ == 0 && !olv_fetch_thread_.joinable())
+                    if (!olv_posts_.empty()) {
+                        olv_post_idx_ = (olv_post_idx_ + 1) % olv_posts_.size();
+                        if (olv_post_idx_ == 0) {
+                            if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                            olv_fetching_ = true;
+                            olv_fetch_thread_ = std::thread([this] {
+                                OSSetThreadAffinity(OSGetCurrentThread(),
+                                                    OS_THREAD_ATTRIB_AFFINITY_CPU0);
+                                olv_fetch(OLV::COMMUNITY_ID);
+                            });
+                        } else {
+                            olv_show_current();
+                        }
+                    } else {
+                        if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                        olv_fetching_ = true;
                         olv_fetch_thread_ = std::thread([this] {
                             OSSetThreadAffinity(OSGetCurrentThread(),
                                                 OS_THREAD_ATTRIB_AFFINITY_CPU0);
                             olv_fetch(OLV::COMMUNITY_ID);
                         });
-                    else
-                        olv_show_current();
+                    }
                 }
             }
         }
@@ -460,12 +473,7 @@ void Player::on_track_changed(const std::string &title, const std::string &artis
         std::lock_guard<std::mutex> lk(olv_mu_);
         olv_posts_.clear();
         olv_post_idx_ = 0;
-        if (olv_card_visible_ && OLV::is_available() && !olv_fetch_thread_.joinable()) {
-            olv_fetch_thread_ = std::thread([this] {
-                OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-                olv_fetch(OLV::COMMUNITY_ID);
-            });
-        }
+        olv_last_advance_ = 0;  // trigger immediate fetch on next main loop tick
     }
 }
 
@@ -550,12 +558,15 @@ void Player::handle_buttons(uint32_t trigger) {
         olv_card_visible_ = !olv_card_visible_;
         if (olv_card_visible_) {
             if (olv_posts_.empty()) {
-                if (!olv_fetch_thread_.joinable())
+                if (!olv_fetching_) {
+                    if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                    olv_fetching_ = true;
                     olv_fetch_thread_ = std::thread([this] {
                         OSSetThreadAffinity(OSGetCurrentThread(),
                                             OS_THREAD_ATTRIB_AFFINITY_CPU0);
                         olv_fetch(OLV::COMMUNITY_ID);
                     });
+                }
             } else {
                 olv_last_advance_ = OSGetSystemTick();
                 olv_show_current();
@@ -677,12 +688,15 @@ void Player::handle_pro_buttons(uint32_t trigger) {
         olv_card_visible_ = !olv_card_visible_;
         if (olv_card_visible_) {
             if (olv_posts_.empty()) {
-                if (!olv_fetch_thread_.joinable())
+                if (!olv_fetching_) {
+                    if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                    olv_fetching_ = true;
                     olv_fetch_thread_ = std::thread([this] {
                         OSSetThreadAffinity(OSGetCurrentThread(),
                                             OS_THREAD_ATTRIB_AFFINITY_CPU0);
                         olv_fetch(OLV::COMMUNITY_ID);
                     });
+                }
             } else {
                 olv_last_advance_ = OSGetSystemTick();
                 olv_show_current();
@@ -735,14 +749,17 @@ void Player::olv_fetch(uint32_t cid) {
     std::string cur_id = track_id_;  // snapshot before blocking fetch
     auto posts = OLV::fetch_posts(cid, 5, cur_id);
 
-    std::lock_guard<std::mutex> lk(olv_mu_);
-    if (!posts.empty()) {
-        olv_posts_    = std::move(posts);
-        olv_post_idx_ = 0;
-        olv_last_advance_ = OSGetSystemTick();
+    {
+        std::lock_guard<std::mutex> lk(olv_mu_);
+        if (!posts.empty()) {
+            olv_posts_    = std::move(posts);
+            olv_post_idx_ = 0;
+            olv_last_advance_ = OSGetSystemTick();
+        }
+        if (olv_card_visible_)
+            olv_show_current();
     }
-    if (olv_card_visible_)
-        olv_show_current();
+    olv_fetching_ = false;
 }
 
 } // namespace Connect
