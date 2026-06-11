@@ -30,8 +30,10 @@ void shutdown();
 bool is_available();
 
 // Synchronously fetch up to limit posts from community_id.
+// If search_key is non-empty, the server filters to posts with that key.
 // Blocks. Returns empty vector on any failure.
-std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit);
+std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit,
+                              const std::string &search_key = {});
 
 // Open the Miiverse post-creation applet with body_utf8 pre-filled.
 // title sets the topic tag (pass "Song - Artist"); search_key (Spotify track ID) is attached for

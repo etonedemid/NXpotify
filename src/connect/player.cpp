@@ -721,7 +721,9 @@ void Player::olv_show_current() {
 }
 
 void Player::olv_fetch(uint32_t cid) {
-    auto posts = OLV::fetch_posts(cid, 5);
+    std::string cur_id = track_id_;  // snapshot before blocking fetch
+    auto posts = OLV::fetch_posts(cid, 20, cur_id);
+
     std::lock_guard<std::mutex> lk(olv_mu_);
     if (!posts.empty()) {
         olv_posts_    = std::move(posts);

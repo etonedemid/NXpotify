@@ -67,18 +67,20 @@ using FnGetUrl = void (*)(const DownloadParam *, char *, uint32_t);
 static FnGetUrl s_fn_get_url = nullptr;
 
 // nn::olv::DownloadPostDataList — native post fetch via system HTTP stack
-using FnDownloadPosts = int32_t (*)(void *, void *, uint32_t *, uint32_t, const DownloadParam *);
-using FnCtor          = void    (*)(void *);
-static FnDownloadPosts s_fn_download   = nullptr;
-static FnCtor          s_fn_ctor_post  = nullptr;
-static FnCtor          s_fn_ctor_topic = nullptr;
+using FnDownloadPosts    = int32_t (*)(void *, void *, uint32_t *, uint32_t, const DownloadParam *);
+using FnCtor             = void    (*)(void *);
+using FnDLSetSearchKey   = int32_t (*)(void *, const uint16_t *);  // DownloadPostDataListParam::SetSearchKey (UTF-16)
+static FnDownloadPosts   s_fn_download         = nullptr;
+static FnCtor            s_fn_ctor_post        = nullptr;
+static FnCtor            s_fn_ctor_topic       = nullptr;
+static FnDLSetSearchKey  s_fn_dl_set_search    = nullptr;
 
 // nn::olv::UploadPostDataByPostApp — interactive post creation applet
 using FnSetWork      = void    (*)(void *, uint8_t *, uint32_t);
 using FnSetBodyText  = void    (*)(void *, const uint16_t *);  // wchar_t* = uint16_t* on Wii U
 using FnSetFlags     = void    (*)(void *, uint32_t);
 using FnSetTopicTag  = void    (*)(void *, const uint16_t *);  // UTF-16 topic label
-using FnSetSearchKey = void    (*)(void *, const char *);      // ASCII search key
+using FnSetSearchKey = void    (*)(void *, const uint16_t *);  // UTF-16 search key
 using FnUploadPost   = int32_t (*)(const void *);
 static FnCtor         s_fn_ctor_upload  = nullptr;
 static FnSetWork      s_fn_set_work     = nullptr;
@@ -187,10 +189,14 @@ bool init() {
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "__ct__Q3_2nn3olv19DownloadedTopicDataFv",
         reinterpret_cast<void **>(&s_fn_ctor_topic));
-    WHBLogPrintf("olv: native download=%s ctor_post=%s ctor_topic=%s",
-                 s_fn_download   ? "ok" : "missing",
-                 s_fn_ctor_post  ? "ok" : "missing",
-                 s_fn_ctor_topic ? "ok" : "missing");
+    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+        "SetSearchKey__Q3_2nn3olv25DownloadPostDataListParamFPCw",
+        reinterpret_cast<void **>(&s_fn_dl_set_search));
+    WHBLogPrintf("olv: native download=%s ctor_post=%s ctor_topic=%s dl_search=%s",
+                 s_fn_download      ? "ok" : "missing",
+                 s_fn_ctor_post     ? "ok" : "missing",
+                 s_fn_ctor_topic    ? "ok" : "missing",
+                 s_fn_dl_set_search ? "ok" : "missing");
 
     // Post-creation applet symbols.
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
@@ -217,11 +223,11 @@ bool init() {
             "SetTopicTag__Q3_2nn3olv28UploadPostDataByPostAppParamFPCw",
             reinterpret_cast<void **>(&s_fn_set_topic));
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
-        "SetSearchKey__Q3_2nn3olv15UploadParamBaseFPCc",
+        "SetSearchKey__Q3_2nn3olv15UploadParamBaseFPCw",
         reinterpret_cast<void **>(&s_fn_set_search));
     if (!s_fn_set_search)
         OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
-            "SetSearchKey__Q3_2nn3olv28UploadPostDataByPostAppParamFPCc",
+            "SetSearchKey__Q3_2nn3olv28UploadPostDataByPostAppParamFPCw",
             reinterpret_cast<void **>(&s_fn_set_search));
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "UploadPostDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv28UploadPostDataByPostAppParam",
@@ -304,9 +310,9 @@ void shutdown() {
 
 bool is_available() { return s_available; }
 
-std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit) {
+std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit,
+                              const std::string &search_key) {
     if (!s_available) return {};
-    limit = std::min(limit, uint32_t{5});
 
     // ── Native nn_olv path (uses system HTTP stack, respects Inkay DNS) ────────
     if (s_fn_download && s_fn_ctor_post && s_fn_ctor_topic) {
@@ -320,6 +326,10 @@ std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit) {
             DownloadParam param = {};
             param.communityId    = community_id;
             param.postDataMaxNum = limit;
+            if (!search_key.empty() && s_fn_dl_set_search) {
+                auto sk16 = utf8_to_utf16(search_key, 64);
+                s_fn_dl_set_search(&param, sk16.data());
+            }
 
             uint32_t num_out = 0;
             int32_t rc = s_fn_download(topic.get(), posts.get(), &num_out, limit, &param);
@@ -349,12 +359,16 @@ std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit) {
     // ── libcurl fallback ──────────────────────────────────────────────────────
     if (s_token[0] == '\0') return {};
 
-    // Build the API URL.
+    // Build the API URL via nn_olv's own URL builder so it includes the search key.
     std::string url;
     if (s_fn_get_url) {
         DownloadParam param = {};
         param.communityId    = community_id;
         param.postDataMaxNum = limit;
+        if (!search_key.empty() && s_fn_dl_set_search) {
+            auto sk16 = utf8_to_utf16(search_key, 64);
+            s_fn_dl_set_search(&param, sk16.data());
+        }
         char buf[512] = {};
         s_fn_get_url(&param, buf, sizeof(buf));
         if (buf[0]) {
@@ -474,8 +488,10 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
     }
 
     // Search key: Spotify track ID — used to find all posts for a specific song.
-    if (s_fn_set_search)
-        s_fn_set_search(s_upload_param, search_key.c_str());
+    if (s_fn_set_search && !search_key.empty()) {
+        auto sk16 = utf8_to_utf16(search_key, 64);
+        s_fn_set_search(s_upload_param, sk16.data());
+    }
 
     // IS_SPOILER in the upload param flags is bit 0 (0x1), distinct from the
     // DownloadedDataBase read-side flag (0x200).
