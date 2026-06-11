@@ -40,6 +40,7 @@ endif
 SOURCES := src               \
            src/connect       \
            src/discovery     \
+           src/olv           \
            src/ui            \
            vendor/cJSON      \
            $(TREMOR_SOURCES)

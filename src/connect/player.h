@@ -5,6 +5,7 @@
 #include <mutex>
 #include <vector>
 #include "../discovery/zeroconf.h"
+#include "../olv/olv.h"
 #include "../ui/display.h"
 
 // Forward declarations — full headers pulled in player.cpp only
@@ -70,9 +71,20 @@ private:
     int            volume_          = 100;
     bool           spirc_playing_   = false;
     int            track_dur_ms_    = 0;
+    std::string    track_title_;
+    std::string    track_artist_;
     bool           track_explicit_  = false;
     bool           crystal_enabled_ = false;
     int            crystal_strength_= 5;     // 1–10
+
+    // ── Roséverse OLV ────────────────────────────────────────────────────────
+    std::vector<OLV::Post> olv_posts_;
+    size_t                olv_post_idx_      = 0;
+    std::mutex            olv_mu_;
+    std::thread           olv_init_thread_;
+    std::thread           olv_fetch_thread_;
+    void olv_show_current();        // push current post to display (call under olv_mu_)
+    void olv_fetch(uint32_t cid);   // blocking fetch, runs on olv_fetch_thread_
 
     // Pending audio start state (CDN URL arrives first; AES key comes second)
     std::mutex              aes_mu_;

@@ -2,6 +2,7 @@
 #include "theme.h"
 #include "font_data.h"
 #include "../connect/audio.h"
+#include "../olv/olv.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -116,6 +117,7 @@ void Display::shutdown() {
     lc_pos_.free();   lc_dur_.free();   lc_vol_.free();
     lc_shuf_.free();  lc_rep_.free();   lc_xtal_.free();  lc_bhint_.free();
     lc_wait_[0].free(); lc_wait_[1].free();
+    lc_olv_header_.free(); lc_olv_body_.free();
     if (bg_tex_)     { SDL_DestroyTexture(bg_tex_);  bg_tex_  = nullptr; }
     if (art_tex_)    { SDL_DestroyTexture(art_tex_); art_tex_ = nullptr; }
     if (font_sm_)    TTF_CloseFont(font_sm_);
@@ -174,6 +176,24 @@ void Display::set_crystalizer(bool on, int strength) {
 
 void Display::toggle_controls() {
     std::lock_guard<std::mutex> lk(mu_); controls_ = !controls_;
+}
+
+void Display::set_olv_post(const OLVPost *post) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!post) {
+        olv_visible_ = false;
+        olv_body_    = "";
+        olv_header_  = "";
+        return;
+    }
+    olv_visible_ = true;
+    olv_body_    = post->body;
+
+    // Build header line:  @ScreenName  :)
+    const char *feeling = (post->feeling >= 0 && post->feeling <= 5)
+                        ? OLV::FEELING_STR[post->feeling] : "";
+    olv_header_ = "@" + post->screen_name;
+    if (feeling && feeling[0]) { olv_header_ += "  "; olv_header_ += feeling; }
 }
 
 // ── render (main thread) ──────────────────────────────────────────────────────
@@ -300,11 +320,12 @@ void Display::draw_label(SDL_Renderer *r, const CachedLabel &lbl, int x, int y, 
 // Snapshots state under mu_, then renders while NOT holding the lock.
 
 void Display::render_to(SDL_Renderer *r, int w, int h) {
-    bool snap_waiting, snap_controls;
+    bool snap_waiting, snap_controls, snap_olv;
     {
         std::lock_guard<std::mutex> lk(mu_);
         snap_waiting  = waiting_;
         snap_controls = controls_;
+        snap_olv      = olv_visible_;
     }
 
     if (bg_tex_) {
@@ -317,6 +338,9 @@ void Display::render_to(SDL_Renderer *r, int w, int h) {
     if      (snap_controls) render_controls(r, w, h);
     else if (snap_waiting)  render_waiting(r, w, h);
     else                    render_playing(r, w, h);
+
+    // OLV card overlays the bottom strip when visible (independent of controls/waiting)
+    if (snap_olv && !snap_controls) render_olv_card(r, w, h);
 }
 
 void Display::render_waiting(SDL_Renderer *r, int w, int h) {
@@ -343,16 +367,18 @@ void Display::render_controls(SDL_Renderer *r, int w, int h) {
 
     struct Row { const char *btn; const char *action; };
     static constexpr Row gamepad[] = {
-        { "GamePad / Pro Con", ""                  },
-        { "A",          "Play / Pause"            },
-        { "R / L",      "Skip Fwd / Back"         },
-        { "ZR / ZL",    "Seek +5s / -5s"          },
-        { "+ / -",      "Volume Up / Down"        },
-        { "X",          "Shuffle"                 },
-        { "Y",          "Repeat"                  },
-        { "Up / Down",  "Crystalizer On / Off"    },
-        { "Left / Right","Crystalizer Strength"   },
-        { "B",          "This screen"             },
+        { "GamePad / Pro Con", ""                       },
+        { "A",           "Play / Pause"                },
+        { "R / L",       "Skip Fwd / Back"             },
+        { "ZR / ZL",     "Seek +5s / -5s"             },
+        { "+ / -",       "Volume Up / Down"            },
+        { "X",           "Shuffle"                     },
+        { "Y",           "Repeat"                      },
+        { "Up / Down",   "Crystalizer On / Off"        },
+        { "Left / Right","Crystalizer Strength"        },
+        { "Stick R",     "Miiverse posts"              },
+        { "Stick L",     "Post to Miiverse"            },
+        { "B",           "This screen"                 },
     };
     static constexpr Row wiimote[] = {
         { "Wiimote",  ""                  },
@@ -371,7 +397,7 @@ void Display::render_controls(SDL_Renderer *r, int w, int h) {
 
     for (int col = 0; col < 2; ++col) {
         const Row *rows = (col == 0) ? gamepad : wiimote;
-        int nrows = (col == 0) ? 10 : 8;
+        int nrows = (col == 0) ? 12 : 8;
         int x = col_x[col];
         for (int i = 0; i < nrows; ++i) {
             int y = top_y + i * row_h;
@@ -793,6 +819,60 @@ void Display::art_worker() {
             art_pending_data_ = std::move(data);
             art_ready_        = true;
         }
+    }
+}
+
+// ── Roséverse OLV post card ───────────────────────────────────────────────────
+// Sits in the text column (TEXT_X..BAR_X+BAR_W) below the artist name.
+
+void Display::render_olv_card(SDL_Renderer *r, int w, int h) {
+    std::string hdr, body;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!olv_visible_) return;
+        hdr  = olv_header_;
+        body = olv_body_;
+    }
+    if (hdr.empty() && body.empty()) return;
+
+    float s = w / 1280.0f;
+    auto  S = [&](int v) { return (int)(v * s); };
+
+    // Aligned with the text column, below the artist name (ARTIST_Y=170).
+    const int card_x = S(Theme::TEXT_X);
+    const int card_y = S(Theme::ARTIST_Y + 60);  // ~230
+    const int card_w = S(Theme::BAR_X + Theme::BAR_W - Theme::TEXT_X);  // 792
+    const int card_h = S(66);
+
+    // Dark semi-transparent card background
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 20, 10, 30, 210);
+    SDL_Rect bg = { card_x, card_y, card_w, card_h };
+    SDL_RenderFillRect(r, &bg);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+
+    // Accent left-edge bar
+    SDL_SetRenderDrawColor(r,
+        Theme::ACCENT.r, Theme::ACCENT.g, Theme::ACCENT.b, 255);
+    SDL_Rect bar = { card_x, card_y, S(3), card_h };
+    SDL_RenderFillRect(r, &bar);
+
+    const int tx  = card_x + S(12);
+    const int mw  = card_w - S(16);
+
+    // Header: "Roséverse  @name  :)" — accent colour, small font
+    if (font_sm_) {
+        std::string full_hdr = "Miiverse  " + hdr;
+        update_label(lc_olv_header_, r, font_sm_, full_hdr.c_str(),
+                     Theme::ACCENT, mw);
+        draw_label(r, lc_olv_header_, tx, card_y + S(6));
+    }
+
+    // Body text — white, medium font, truncated to card width
+    if (font_md_ && !body.empty()) {
+        update_label(lc_olv_body_, r, font_md_, body.c_str(),
+                     Theme::TEXT, mw);
+        draw_label(r, lc_olv_body_, tx, card_y + S(30));
     }
 }
 
