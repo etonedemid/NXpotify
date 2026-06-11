@@ -38,12 +38,8 @@ static_assert(sizeof(DownloadParam) == 0x1000);
 // ── DownloadedPostData / DownloadedTopicData layout ───────────────────────────
 // Struct sizes and field offsets verified from Cemu OS/libs/nn_olv source.
 // DownloadedDataBase (base of DownloadedPostData) field offsets:
-static constexpr uint32_t k_PostDataSize  = 0xC208; // sizeof DownloadedPostData
-static constexpr uint32_t k_TopicDataSize = 0x1000; // sizeof DownloadedTopicData
-static constexpr uint32_t k_OffFeeling    = 0x0030; // sint8
-static constexpr uint32_t k_OffBodyText   = 0x003C; // uint16[256] UTF-16
-static constexpr uint32_t k_OffBodyLen    = 0x023C; // uint32 character count
-static constexpr uint32_t k_OffNickname   = 0xAAE0; // uint16[16] UTF-16
+static constexpr uint32_t k_PostDataSize  = 0xC208; // sizeof DownloadedPostData (from Cemu)
+static constexpr uint32_t k_TopicDataSize = 0x1000; // sizeof DownloadedTopicData (from Cemu)
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
@@ -53,14 +49,20 @@ static bool             s_available = false;
 // nn::olv::DownloadPostDataList — native post fetch via system HTTP stack
 using FnDownloadPosts    = int32_t (*)(void *, void *, uint32_t *, uint32_t, const DownloadParam *);
 using FnCtor             = void    (*)(void *);
-using FnDLSetUi          = int32_t (*)(void *, uint32_t);           // SetCommunityId / SetPostDataMaxNum
-using FnDLSetSearchKey   = int32_t (*)(void *, const uint16_t *, uint8_t);  // SetSearchKey (UTF-16 + index)
+using FnDLSetUi          = int32_t (*)(void *, uint32_t);
+using FnDLSetSearchKey   = int32_t (*)(void *, const uint16_t *, uint8_t);
+using FnGetBodyText      = int32_t (*)(const void *, uint16_t *, uint32_t);  // GetBodyText(wchar_t*, u32)
+using FnGetMiiNickname   = const uint16_t * (*)(const void *);               // GetMiiNickname() → const wchar_t*
+using FnGetFeeling       = int8_t  (*)(const void *);                        // GetFeeling() → s8
 static FnDownloadPosts   s_fn_download         = nullptr;
 static FnCtor            s_fn_ctor_post        = nullptr;
 static FnCtor            s_fn_ctor_topic       = nullptr;
 static FnDLSetUi         s_fn_dl_set_community = nullptr;
 static FnDLSetUi         s_fn_dl_set_max_num   = nullptr;
 static FnDLSetSearchKey  s_fn_dl_set_search    = nullptr;
+static FnGetBodyText     s_fn_get_body_text    = nullptr;
+static FnGetMiiNickname  s_fn_get_mii_nickname = nullptr;
+static FnGetFeeling      s_fn_get_feeling      = nullptr;
 
 // nn::olv::UploadPostDataByPostApp — interactive post creation applet
 using FnSetWork        = void    (*)(void *, uint8_t *, uint32_t);
@@ -174,10 +176,22 @@ bool init() {
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "SetSearchKey__Q3_2nn3olv25DownloadPostDataListParamFPCwUc",
         reinterpret_cast<void **>(&s_fn_dl_set_search));
-    WHBLogPrintf("olv: dl community=%s maxnum=%s search=%s",
+    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+        "GetBodyText__Q3_2nn3olv18DownloadedDataBaseCFPwUi",
+        reinterpret_cast<void **>(&s_fn_get_body_text));
+    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+        "GetMiiNickname__Q3_2nn3olv18DownloadedDataBaseCFv",
+        reinterpret_cast<void **>(&s_fn_get_mii_nickname));
+    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+        "GetFeeling__Q3_2nn3olv18DownloadedDataBaseCFv",
+        reinterpret_cast<void **>(&s_fn_get_feeling));
+    WHBLogPrintf("olv: dl community=%s maxnum=%s search=%s body=%s nickname=%s feeling=%s",
                  s_fn_dl_set_community ? "ok" : "missing",
                  s_fn_dl_set_max_num   ? "ok" : "missing",
-                 s_fn_dl_set_search    ? "ok" : "missing");
+                 s_fn_dl_set_search    ? "ok" : "missing",
+                 s_fn_get_body_text    ? "ok" : "missing",
+                 s_fn_get_mii_nickname ? "ok" : "missing",
+                 s_fn_get_feeling      ? "ok" : "missing");
 
     // Post-creation applet symbols.
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
@@ -300,16 +314,21 @@ std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit,
             if ((rc == 0 || (uint32_t)rc == 0x01100080u) && num_out > 0) {
                 std::vector<Post> out;
                 for (uint32_t i = 0; i < num_out; ++i) {
-                    const uint8_t *p = posts.get() + i * k_PostDataSize;
-                    uint32_t body_len = *reinterpret_cast<const uint32_t *>(p + k_OffBodyLen);
-                    body_len = std::min(body_len, uint32_t{256});
+                    const void *p = posts.get() + i * k_PostDataSize;
                     Post post;
-                    post.body = utf16_to_utf8(
-                        reinterpret_cast<const uint16_t *>(p + k_OffBodyText), body_len);
-                    post.screen_name = utf16_to_utf8(
-                        reinterpret_cast<const uint16_t *>(p + k_OffNickname), 16);
-                    post.feeling = std::max(0, std::min(5,
-                        static_cast<int>(static_cast<int8_t>(p[k_OffFeeling]))));
+                    if (s_fn_get_body_text) {
+                        uint16_t buf[201] = {};
+                        s_fn_get_body_text(p, buf, 200);
+                        post.body = utf16_to_utf8(buf, 200);
+                    }
+                    if (post.body.empty()) continue;
+                    if (s_fn_get_mii_nickname) {
+                        const uint16_t *nick = s_fn_get_mii_nickname(p);
+                        if (nick) post.screen_name = utf16_to_utf8(nick, 16);
+                    }
+                    post.feeling = s_fn_get_feeling
+                        ? std::max(0, std::min(5, (int)s_fn_get_feeling(p)))
+                        : 0;
                     out.push_back(std::move(post));
                 }
                 WHBLogPrintf("olv: fetch ok, %zu posts", out.size());
