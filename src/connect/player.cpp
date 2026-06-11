@@ -2,6 +2,7 @@
 #include "ap.h"
 #include "spirc.h"
 #include "audio.h"
+#include "../olv/olv.h"
 
 #include <cstdio>
 #include <cstring>
@@ -97,6 +98,12 @@ void Player::run() {
     display_.set_audio(audio_.get());
     display_.set_waiting();
 
+    // Initialise OLV in background (blocks on network; detects Roséverse).
+    olv_init_thread_ = std::thread([this] {
+        OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
+        OLV::init();
+    });
+
     if (!audio_->init())
         WHBLogPrint("player: audio init failed");
 
@@ -190,6 +197,39 @@ void Player::run() {
             }
         }
 
+        // Auto-advance OLV card every 5 s while visible
+        if (OLV::is_available()) {
+            uint64_t now = OSGetSystemTick();
+            if (now - olv_last_advance_ >= OSSecondsToTicks(5)) {
+                std::lock_guard<std::mutex> lk(olv_mu_);
+                if (olv_card_visible_ && !olv_fetching_) {
+                    olv_last_advance_ = now;
+                    if (!olv_posts_.empty()) {
+                        olv_post_idx_ = (olv_post_idx_ + 1) % olv_posts_.size();
+                        if (olv_post_idx_ == 0) {
+                            if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                            olv_fetching_ = true;
+                            olv_fetch_thread_ = std::thread([this] {
+                                OSSetThreadAffinity(OSGetCurrentThread(),
+                                                    OS_THREAD_ATTRIB_AFFINITY_CPU0);
+                                olv_fetch(OLV::COMMUNITY_ID);
+                            });
+                        } else {
+                            olv_show_current();
+                        }
+                    } else {
+                        if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                        olv_fetching_ = true;
+                        olv_fetch_thread_ = std::thread([this] {
+                            OSSetThreadAffinity(OSGetCurrentThread(),
+                                                OS_THREAD_ATTRIB_AFFINITY_CPU0);
+                            olv_fetch(OLV::COMMUNITY_ID);
+                        });
+                    }
+                }
+            }
+        }
+
         OSSleepTicks(OSMillisecondsToTicks(16));
     }
 
@@ -205,6 +245,11 @@ void Player::run() {
     if (spirc_) { spirc_->stop(); spirc_.reset(); }
     audio_->shutdown();
     display_.shutdown();
+
+    // OLV teardown — join threads then shut down the module.
+    if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+    if (olv_init_thread_.joinable())  olv_init_thread_.join();
+    OLV::shutdown();
 }
 
 // ── Credentials — connect to AP ───────────────────────────────────────────────
@@ -279,8 +324,9 @@ void Player::on_credentials(Discovery::Credentials creds) {
                                   const std::string &a,
                                   const std::string &u,
                                   int64_t dur,
-                                  bool expl) {
-        on_track_changed(t, a, u, dur, expl);
+                                  bool expl,
+                                  const std::string &id) {
+        on_track_changed(t, a, u, dur, expl, id);
     };
 
     spirc_->start(std::move(scb));
@@ -415,10 +461,20 @@ void Player::on_volume(int vol_pct) {
 }
 
 void Player::on_track_changed(const std::string &title, const std::string &artist,
-                               const std::string &art_url, int64_t duration_ms, bool is_explicit) {
+                               const std::string &art_url, int64_t duration_ms, bool is_explicit,
+                               const std::string &track_id) {
     track_dur_ms_   = (int)std::min(duration_ms, (int64_t)INT_MAX);
+    track_title_    = title;
+    track_artist_   = artist;
+    track_id_       = track_id;
     track_explicit_ = is_explicit;
     display_.set_track(title, artist, art_url, is_explicit);
+    {
+        std::lock_guard<std::mutex> lk(olv_mu_);
+        olv_posts_.clear();
+        olv_post_idx_ = 0;
+        olv_last_advance_ = 0;  // trigger immediate fetch on next main loop tick
+    }
 }
 
 // ── GamePad buttons ───────────────────────────────────────────────────────────
@@ -494,6 +550,35 @@ void Player::handle_buttons(uint32_t trigger) {
             display_.set_progress(pos, track_dur_ms_, true);
         }
         spirc_->notify(spirc_playing_, pos, volume_);
+    }
+
+    // ── OLV: StickR = toggle post card visibility ────────────────────────────
+    if ((trigger & VPAD_BUTTON_STICK_R) && OLV::is_available()) {
+        std::lock_guard<std::mutex> lk(olv_mu_);
+        olv_card_visible_ = !olv_card_visible_;
+        if (olv_card_visible_) {
+            if (olv_posts_.empty()) {
+                if (!olv_fetching_) {
+                    if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                    olv_fetching_ = true;
+                    olv_fetch_thread_ = std::thread([this] {
+                        OSSetThreadAffinity(OSGetCurrentThread(),
+                                            OS_THREAD_ATTRIB_AFFINITY_CPU0);
+                        olv_fetch(OLV::COMMUNITY_ID);
+                    });
+                }
+            } else {
+                olv_last_advance_ = OSGetSystemTick();
+                olv_show_current();
+            }
+        } else {
+            display_.set_olv_post(nullptr);
+        }
+    }
+    if ((trigger & VPAD_BUTTON_STICK_L) && OLV::is_available()) {
+        // ♪ Title — Artist  (UTF-8: ♪ = \xe2\x99\xaa, — = \xe2\x80\x94)
+        std::string body = "\xe2\x99\xaa " + track_title_ + " \xe2\x80\x94 " + track_artist_;
+        OLV::open_post_applet(body, track_explicit_, track_title_ + " - " + track_artist_, track_id_);
     }
 }
 
@@ -598,6 +683,32 @@ void Player::handle_pro_buttons(uint32_t trigger) {
     }
     if (trigger & WPAD_PRO_BUTTON_B)
         display_.toggle_controls();
+    if ((trigger & WPAD_PRO_BUTTON_STICK_R) && OLV::is_available()) {
+        std::lock_guard<std::mutex> lk(olv_mu_);
+        olv_card_visible_ = !olv_card_visible_;
+        if (olv_card_visible_) {
+            if (olv_posts_.empty()) {
+                if (!olv_fetching_) {
+                    if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
+                    olv_fetching_ = true;
+                    olv_fetch_thread_ = std::thread([this] {
+                        OSSetThreadAffinity(OSGetCurrentThread(),
+                                            OS_THREAD_ATTRIB_AFFINITY_CPU0);
+                        olv_fetch(OLV::COMMUNITY_ID);
+                    });
+                }
+            } else {
+                olv_last_advance_ = OSGetSystemTick();
+                olv_show_current();
+            }
+        } else {
+            display_.set_olv_post(nullptr);
+        }
+    }
+    if ((trigger & WPAD_PRO_BUTTON_STICK_L) && OLV::is_available()) {
+        std::string body = "\xe2\x99\xaa " + track_title_ + " \xe2\x80\x94 " + track_artist_;
+        OLV::open_post_applet(body, track_explicit_, track_title_ + " - " + track_artist_, track_id_);
+    }
     if ((trigger & WPAD_PRO_BUTTON_X) && spirc_) {
         spirc_->toggle_shuffle();
         display_.set_shuffle(spirc_->shuffle());
@@ -619,6 +730,36 @@ void Player::handle_pro_buttons(uint32_t trigger) {
         }
         spirc_->notify(spirc_playing_, pos, volume_);
     }
+}
+
+// ── OLV helpers ───────────────────────────────────────────────────────────────
+
+void Player::olv_show_current() {
+    // Must be called with olv_mu_ held.
+    if (olv_posts_.empty()) {
+        display_.set_olv_post(nullptr);
+        return;
+    }
+    const OLV::Post &p = olv_posts_[olv_post_idx_];
+    UI::Display::OLVPost dp{ p.body, p.screen_name, p.feeling };
+    display_.set_olv_post(&dp);
+}
+
+void Player::olv_fetch(uint32_t cid) {
+    std::string cur_id = track_id_;  // snapshot before blocking fetch
+    auto posts = OLV::fetch_posts(cid, 5, cur_id);
+
+    {
+        std::lock_guard<std::mutex> lk(olv_mu_);
+        if (!posts.empty()) {
+            olv_posts_    = std::move(posts);
+            olv_post_idx_ = 0;
+            olv_last_advance_ = OSGetSystemTick();
+        }
+        if (olv_card_visible_)
+            olv_show_current();
+    }
+    olv_fetching_ = false;
 }
 
 } // namespace Connect
