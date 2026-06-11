@@ -5,9 +5,7 @@
 
 namespace OLV {
 
-// 0 = general/default community on Roséverse.
-// Update to the dedicated Spotify community ID once assigned.
-static constexpr uint32_t COMMUNITY_ID = 0;
+static constexpr uint32_t COMMUNITY_ID = 157;
 
 // 0=normal 1=happy 2=wink 3=surprised 4=frustrated 5=sad
 static constexpr const char *FEELING_STR[] = {
