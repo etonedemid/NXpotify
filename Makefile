@@ -5,10 +5,9 @@ $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=/opt/devkitp
 endif
 
 TOPDIR ?= $(CURDIR)
-include $(DEVKITPRO)/wut/share/wut_rules
 
 #-------------------------------------------------------------------------------
-# App metadata
+# App metadata (must come before wut_rules so WUHB_OPTIONS is built correctly)
 #-------------------------------------------------------------------------------
 TARGET        := spotify-wiiu
 BUILD         := build
@@ -17,8 +16,10 @@ DATA          :=
 APP_NAME       := Spotify Wii U
 APP_SHORTNAME  := Spotify
 APP_AUTHOR     := WiiU Homebrew
-APP_CONTENT    := content
-APP_ICON       := meta/icon.png
+APP_CONTENT    := $(TOPDIR)/content
+APP_ICON       := $(TOPDIR)/meta/icon.png
+
+include $(DEVKITPRO)/wut/share/wut_rules
 
 #-------------------------------------------------------------------------------
 # Tremor (libvorbisidec) — portlib if installed, vendor source otherwise
