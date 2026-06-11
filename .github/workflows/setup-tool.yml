@@ -16,6 +16,7 @@ jobs:
             target: x86_64-unknown-linux-musl
             artifact: spotify-wiiu-setup-linux-x64
             ext: ""
+            container: ghcr.io/happynico7504/spotify-wiiu-builder:latest
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -28,16 +29,18 @@ jobs:
             ext: ""
 
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container || '' }}
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        if: "!matrix.container"
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+      - name: Install musl tools (bare runner)
+        if: matrix.target == 'x86_64-unknown-linux-musl' && !matrix.container
         run: sudo apt-get install -y musl-tools
 
       - name: Build
