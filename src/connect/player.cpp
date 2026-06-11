@@ -460,6 +460,12 @@ void Player::on_track_changed(const std::string &title, const std::string &artis
         std::lock_guard<std::mutex> lk(olv_mu_);
         olv_posts_.clear();
         olv_post_idx_ = 0;
+        if (olv_card_visible_ && OLV::is_available() && !olv_fetch_thread_.joinable()) {
+            olv_fetch_thread_ = std::thread([this] {
+                OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
+                olv_fetch(OLV::COMMUNITY_ID);
+            });
+        }
     }
 }
 
