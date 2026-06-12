@@ -176,6 +176,19 @@ fn find_sd_card() -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
+// ── Aroma detection ───────────────────────────────────────────────────────────
+
+fn wiiu_dir(sd: &Path) -> PathBuf {
+    let lc = sd.join("wiiu");
+    if lc.exists() { lc } else { sd.join("WIIU") }
+}
+
+fn check_aroma(sd: &Path) -> bool {
+    let wiiu = wiiu_dir(sd);
+    wiiu.join("environments").join("aroma").exists()
+        || wiiu.join("environments").join("Aroma").exists()
+}
+
 // ── WUHB download ─────────────────────────────────────────────────────────────
 
 const GITHUB_API: &str =
@@ -335,6 +348,10 @@ fn main() {
     match find_sd_card() {
         Some(sd) => {
             info(&format!("Detected: {}", sd.display()));
+            if !check_aroma(&sd) {
+                warn("Aroma does not appear to be installed on this SD card.");
+                warn("Install it first: https://wiiu.hacks.guide/");
+            }
             let answer = prompt("  Copy spotify_saved_creds.bin to SD card? [Y/n]: ");
             if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
                 let dest = sd.join("spotify_saved_creds.bin");
@@ -362,7 +379,11 @@ fn main() {
             Ok((wuhb, _tag)) => {
                 match find_sd_card() {
                     Some(sd) => {
-                        let app_dir = sd.join("wiiu").join("apps").join("spotify-wiiu");
+                        if !check_aroma(&sd) {
+                            warn("Aroma does not appear to be installed on this SD card.");
+                            warn("Install it first: https://wiiu.hacks.guide/");
+                        }
+                        let app_dir = wiiu_dir(&sd).join("apps").join("spotify-wiiu");
                         if let Err(e) = fs::create_dir_all(&app_dir) {
                             warn(&format!("Could not create app directory: {e}"));
                         }
