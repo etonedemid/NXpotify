@@ -740,7 +740,7 @@ bool AP::do_login(const Discovery::Credentials &creds) {
     pb_u32(sys_info, 10, 0);  // CpuFamily::CPU_FAMILY_UNKNOWN
     pb_u32(sys_info, 40, 0);  // Brand::BRAND_UNBRANDED
     pb_u32(sys_info, 60, 0);  // Os::OS_UNKNOWN
-    pb_str(sys_info, 90, "WiiU;1.0.0;en");
+    pb_str(sys_info, 90, "WiiU;1.1.0;en");
     if (!creds.device_id.empty())
         pb_str(sys_info, 100, creds.device_id);  // device_id
 

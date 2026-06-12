@@ -578,7 +578,7 @@ std::string Zeroconf::build_info_json() const {
         "\"statusString\":\"OK\","
         "\"spotifyError\":0,"
         "\"version\":\"2.1.0\","
-        "\"libraryVersion\":\"0.1.0\","
+        "\"libraryVersion\":\"1.1.0\","
         "\"accountReq\":\"PREMIUM\","
         "\"brandDisplayName\":\"Nintendo\","
         "\"modelDisplayName\":\"Wii U\","

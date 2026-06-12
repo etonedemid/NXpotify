@@ -499,7 +499,7 @@ std::vector<uint8_t> Spirc::build_device_state(bool active, int vol_pct) {
     };
 
     std::vector<uint8_t> ds;
-    pb_str(ds,  1,  "1.0.0");      // sw_version
+    pb_str(ds,  1,  "1.1.0");      // sw_version
     pb_bool(ds, 10, active);        // is_active
     pb_bool(ds, 11, true);          // can_play
     pb_u32(ds,  12, vol);           // volume
@@ -685,7 +685,7 @@ std::vector<uint8_t> Spirc::build_device_info_cs(int vol_pct) {
     pb_u32 (di, 2,  vol);            // volume
     pb_str (di, 3,  device_name_);  // name
     pb_msg (di, 4,  caps);           // capabilities
-    pb_str (di, 6,  "1.0.0");        // device_software_version
+    pb_str (di, 6,  "1.1.0");        // device_software_version
     pb_u32 (di, 7,  9);              // device_type: GAME_CONSOLE = 9
     pb_str (di, 9,  "3.2.6");        // spirc_version
     pb_str (di, 10, device_id_);    // device_id
