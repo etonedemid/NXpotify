@@ -400,8 +400,9 @@ void Player::on_credentials(Discovery::Credentials creds) {
                                   const std::string &u,
                                   int64_t dur,
                                   bool expl,
-                                  const std::string &id) {
-        on_track_changed(t, a, u, dur, expl, id);
+                                  const std::string &id,
+                                  const std::string &isrc) {
+        on_track_changed(t, a, u, dur, expl, id, isrc);
     };
 
     spirc_->start(std::move(scb));
@@ -537,11 +538,12 @@ void Player::on_volume(int vol_pct) {
 
 void Player::on_track_changed(const std::string &title, const std::string &artist,
                                const std::string &art_url, int64_t duration_ms, bool is_explicit,
-                               const std::string &track_id) {
+                               const std::string &track_id, const std::string &isrc) {
     track_dur_ms_   = (int)std::min(duration_ms, (int64_t)INT_MAX);
     track_title_    = title;
     track_artist_   = artist;
     track_id_       = track_id;
+    isrc_           = isrc;
     track_explicit_ = is_explicit;
     display_.set_track(title, artist, art_url, is_explicit);
     {
@@ -643,7 +645,8 @@ void Player::handle_buttons(uint32_t trigger) {
     }
     if ((trigger & VPAD_BUTTON_STICK_L) && OLV::is_available() && spirc_playing_) {
         // ♪ Title — Artist  (UTF-8: ♪ = \xe2\x99\xaa, — = \xe2\x80\x94)
-        OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, track_id_,
+        const std::string &post_key = isrc_.empty() ? track_id_ : isrc_;
+        OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, post_key,
                               (uint32_t)std::max(0, audio_->position_ms()), (uint32_t)track_dur_ms_);
     }
 }
@@ -846,7 +849,8 @@ void Player::handle_pro_buttons(uint32_t trigger) {
         if (has_post) OLV::open_overlay(post_id);
     }
     if ((trigger & WPAD_PRO_BUTTON_STICK_L) && OLV::is_available() && spirc_playing_) {
-        OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, track_id_,
+        const std::string &post_key = isrc_.empty() ? track_id_ : isrc_;
+        OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, post_key,
                               (uint32_t)std::max(0, audio_->position_ms()), (uint32_t)track_dur_ms_);
     }
     if ((trigger & WPAD_PRO_BUTTON_X) && spirc_) {
@@ -888,8 +892,9 @@ void Player::olv_show_current() {
 }
 
 void Player::olv_fetch(uint32_t cid) {
-    std::string cur_id = track_id_;  // snapshot before blocking fetch
-    auto posts = OLV::fetch_posts(cid, 5, cur_id);
+    // Prefer ISRC (region-neutral) over track ID; fall back if Spotify didn't provide one.
+    std::string cur_key = isrc_.empty() ? track_id_ : isrc_;
+    auto posts = OLV::fetch_posts(cid, 5, cur_key);
 
     {
         std::lock_guard<std::mutex> lk(olv_mu_);

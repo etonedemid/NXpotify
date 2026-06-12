@@ -2054,6 +2054,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
         std::string title;
         std::string artist;
         std::string art_url;
+        std::string isrc;
         std::vector<uint8_t> best_file_id;
         std::vector<uint8_t> best_file_gid = gid; // GID that owns best_file_id
         int best_fmt = -1; // prefer OGG_VORBIS_160=1, then 320=2, then 96=0
@@ -2126,6 +2127,18 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                 if (v) is_explicit = true;
                 break;
             }
+            case 10: {                          // Track.external_id (repeated ExternalId)
+                PRd eid; rd.enter(eid);
+                std::string eid_type, eid_id;
+                uint32_t ef; uint8_t ew;
+                while (eid.next(ef, ew)) {
+                    if      (ef == 1) eid.read_str(eid_type);
+                    else if (ef == 2) eid.read_str(eid_id);
+                    else              eid.skip(ew);
+                }
+                if (eid_type == "isrc" && isrc.empty()) isrc = eid_id;
+                break;
+            }
             case 13: {                          // Track.alternative (repeated Track)
                 // Alternative tracks have their own GID — must use it when requesting the key.
                 PRd alt; rd.enter(alt);
@@ -2162,8 +2175,9 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
             }
         }
 
-        WHBLogPrintf("spirc: metadata '%s' / '%s' fmt=%d dur=%lldms explicit=%d",
-                     title.c_str(), artist.c_str(), best_fmt, (long long)duration_ms, (int)is_explicit);
+        WHBLogPrintf("spirc: metadata '%s' / '%s' fmt=%d dur=%lldms explicit=%d isrc=%s",
+                     title.c_str(), artist.c_str(), best_fmt, (long long)duration_ms, (int)is_explicit,
+                     isrc.c_str());
         if (duration_ms > 0) duration_ms_ = duration_ms;
 
         // Ensure the URI slot for the current track is populated.
@@ -2188,7 +2202,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
 
         if (callbacks_.on_track_changed)
             callbacks_.on_track_changed(title, artist, art_url, duration_ms_, is_explicit,
-                                        gid_to_base62(gid));
+                                        gid_to_base62(gid), isrc);
 
         if (!best_file_id.empty() && callbacks_.on_file_ready)
             callbacks_.on_file_ready(best_file_id, best_file_gid, pos_ms);

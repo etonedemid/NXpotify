@@ -59,7 +59,8 @@ public:
                            const std::string &art_url,
                            int64_t duration_ms,
                            bool is_explicit,
-                           const std::string &track_id)> on_track_changed;
+                           const std::string &track_id,
+                           const std::string &isrc)> on_track_changed;
 
         // Fired when a cluster update confirms another device became active while
         // we were playing — user transferred playback away from us.
