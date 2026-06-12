@@ -488,10 +488,12 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
         return;
     }
 
-    // UploadPostDataByPostAppParam — conservative size estimate for the param header.
-    // The actual data lives in the work buffer; the struct itself just holds metadata.
-    // 512 KB is enough for the memo (153 KB), one 100×100 stamp TGA (40 KB), and overhead.
-    static constexpr uint32_t k_UploadParamSize = 0x80;
+    // UploadPostDataByPostAppParam — use a generous allocation; the stamp count
+    // field lives inside the struct (not the work buffer), and if the struct is
+    // larger than our buffer AddStampData writes the count out-of-bounds and the
+    // applet reads back 0 stamps → no stamp button.  0x200 covers the struct
+    // comfortably on all known firmware versions.
+    static constexpr uint32_t k_UploadParamSize = 0x200;
     alignas(32) static uint8_t s_upload_work[0x80000];  // 512 KB work buffer
     alignas(4)  static uint8_t s_upload_param[k_UploadParamSize];
 
@@ -535,9 +537,13 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
 
     // Add pre-loaded stamps so users can place them on their drawings.
     if (s_fn_add_stamp) {
+        int added = 0;
         for (const auto &tga : s_stamp_tgas) {
-            s_fn_add_stamp(s_upload_param, tga.data(), (uint32_t)tga.size());
+            int32_t sr = s_fn_add_stamp(s_upload_param, tga.data(), (uint32_t)tga.size());
+            if (sr == 0 || (uint32_t)sr == 0x01100080u) ++added;
+            else WHBLogPrintf("olv: AddStampData[%d] → 0x%08X", added, (uint32_t)sr);
         }
+        WHBLogPrintf("olv: %d/%zu stamps added to param", added, s_stamp_tgas.size());
     }
 
     int32_t rc = s_fn_upload_post(s_upload_param);
