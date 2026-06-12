@@ -39,10 +39,11 @@ std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit,
                               const std::string &search_key = {});
 
 // Open the Miiverse post-creation applet with body_utf8 pre-filled.
-// title sets the topic tag (pass "Song - Artist"); search_key (Spotify track ID) is attached for
+// title sets the topic tag (pass "Song - Artist"); search_key (ISRC / track ID) is attached for
 // per-song post lookup. is_explicit=true sets the IS_SPOILER flag.
 // position_ms / duration_ms are embedded in the post's hidden app-data binary so that
 // clients can show posts anchored to their track timestamp. Pass 0/0 if unknown.
+// Stamps loaded from /vol/content/stamps/ at init time are added automatically.
 // Blocking — returns after the user posts or cancels.
 void open_post_applet(const std::string &body_utf8, bool is_explicit,
                       const std::string &title, const std::string &search_key,

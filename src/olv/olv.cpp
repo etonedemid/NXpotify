@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <string>
 
+// stb_image declarations only — implementation lives in display.cpp.
+#define STBI_NO_THREAD_LOCALS
+#include <stb_image.h>
+
 #include <wut.h>
 #include <coreinit/dynload.h>
 #include <sysapp/switch.h>
@@ -87,6 +91,7 @@ using FnSetTopicTag    = void    (*)(void *, const uint16_t *);  // UTF-16 topic
 using FnSetSearchKey   = void    (*)(void *, const uint16_t *, uint8_t);  // UTF-16 search key + index
 using FnSetCommunityId = void    (*)(void *, uint32_t);
 using FnSetAppData     = int32_t (*)(void *, const uint8_t *, uint32_t);  // SetAppData(buf, size)
+using FnAddStampData   = int32_t (*)(void *, const uint8_t *, uint32_t);  // AddStampData(buf, size)
 using FnUploadPost     = int32_t (*)(const void *);
 static FnCtor          s_fn_ctor_upload    = nullptr;
 static FnSetWork       s_fn_set_work       = nullptr;
@@ -96,7 +101,11 @@ static FnSetTopicTag   s_fn_set_topic      = nullptr;
 static FnSetSearchKey  s_fn_set_search     = nullptr;
 static FnSetCommunityId s_fn_set_community = nullptr;
 static FnSetAppData    s_fn_set_appdata    = nullptr;
+static FnAddStampData  s_fn_add_stamp      = nullptr;
 static FnUploadPost    s_fn_upload_post    = nullptr;
+
+// Pre-encoded stamp TGAs loaded from /vol/content/stamps/ at init time.
+static std::vector<std::vector<uint8_t>> s_stamp_tgas;
 
 // Binary app-data payload embedded in every post we create (16 bytes, well under 1 KB).
 // Lets readers anchor posts to their track timestamp.
@@ -166,6 +175,29 @@ static std::vector<uint16_t> utf8_to_utf16(const std::string &utf8, uint32_t max
     }
     out.push_back(0);
     return out;
+}
+
+// Scale src_w × src_h RGBA pixels to 100×100 and encode as a TGA (32-bit BGRA, top-left origin).
+static std::vector<uint8_t> make_stamp_tga(const uint8_t *src, int src_w, int src_h) {
+    if (!src || src_w <= 0 || src_h <= 0) return {};
+    constexpr int SW = 100, SH = 100, HDR = 18;
+    std::vector<uint8_t> tga(HDR + SW * SH * 4, 0);
+    tga[2]  = 2;
+    tga[12] = SW & 0xFF; tga[13] = 0;
+    tga[14] = SH & 0xFF; tga[15] = 0;
+    tga[16] = 32;
+    tga[17] = 0x28;  // top-left origin (bit 5), 8 alpha bits
+    uint8_t *dst = tga.data() + HDR;
+    for (int y = 0; y < SH; ++y) {
+        int sy = y * src_h / SH;
+        for (int x = 0; x < SW; ++x) {
+            int sx = x * src_w / SW;
+            const uint8_t *s = src + (sy * src_w + sx) * 4;
+            dst[0] = s[2]; dst[1] = s[1]; dst[2] = s[0]; dst[3] = s[3]; // RGBA → BGRA
+            dst += 4;
+        }
+    }
+    return tga;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -279,9 +311,12 @@ bool init() {
         "SetAppData__Q3_2nn3olv15UploadParamBaseFPCUcUi",
         reinterpret_cast<void **>(&s_fn_set_appdata));
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+        "AddStampData__Q3_2nn3olv28UploadPostDataByPostAppParamFPCUcUi",
+        reinterpret_cast<void **>(&s_fn_add_stamp));
+    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "UploadPostDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv28UploadPostDataByPostAppParam",
         reinterpret_cast<void **>(&s_fn_upload_post));
-    WHBLogPrintf("olv: post applet ctor=%s work=%s body=%s flags=%s topic=%s search=%s community=%s appdata=%s upload=%s",
+    WHBLogPrintf("olv: post applet ctor=%s work=%s body=%s flags=%s topic=%s search=%s community=%s appdata=%s stamp=%s upload=%s",
                  s_fn_ctor_upload    ? "ok" : "missing",
                  s_fn_set_work       ? "ok" : "missing",
                  s_fn_set_body       ? "ok" : "missing",
@@ -290,6 +325,7 @@ bool init() {
                  s_fn_set_search     ? "ok" : "missing",
                  s_fn_set_community  ? "ok" : "missing",
                  s_fn_set_appdata    ? "ok" : "missing",
+                 s_fn_add_stamp      ? "ok" : "missing",
                  s_fn_upload_post    ? "ok" : "missing");
 
     // Initialize the network/SSL/account stack before calling nn_olv::Initialize.
@@ -323,6 +359,29 @@ bool init() {
             if (r == 0 || (uint32_t)r == 0x01100080u) {
                 WHBLogPrint("olv: ready");
                 s_available = true;
+
+                // Load pre-made stamps from /vol/content/stamps/stamp1.png … stamp8.png.
+                s_stamp_tgas.clear();
+                for (int i = 1; i <= 8; ++i) {
+                    char path[64];
+                    snprintf(path, sizeof(path), "/vol/content/stamps/stamp%d.png", i);
+                    FILE *fp = fopen(path, "rb");
+                    if (!fp) { WHBLogPrintf("olv: stamp %d missing", i); continue; }
+                    fseek(fp, 0, SEEK_END); long sz = ftell(fp); rewind(fp);
+                    std::vector<uint8_t> raw(sz);
+                    fread(raw.data(), 1, sz, fp); fclose(fp);
+                    int w = 0, h = 0, ch = 0;
+                    uint8_t *rgba = stbi_load_from_memory(raw.data(), (int)raw.size(), &w, &h, &ch, 4);
+                    if (!rgba) { WHBLogPrintf("olv: stamp %d decode failed", i); continue; }
+                    auto tga = make_stamp_tga(rgba, w, h);
+                    stbi_image_free(rgba);
+                    if (!tga.empty()) {
+                        s_stamp_tgas.push_back(std::move(tga));
+                        WHBLogPrintf("olv: loaded stamp %d (%dx%d)", i, w, h);
+                    }
+                }
+                WHBLogPrintf("olv: %zu stamps loaded", s_stamp_tgas.size());
+
                 return true;
             }
         }
@@ -431,8 +490,9 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
 
     // UploadPostDataByPostAppParam — conservative size estimate for the param header.
     // The actual data lives in the work buffer; the struct itself just holds metadata.
+    // 512 KB is enough for the memo (153 KB), one 100×100 stamp TGA (40 KB), and overhead.
     static constexpr uint32_t k_UploadParamSize = 0x80;
-    alignas(32) static uint8_t s_upload_work[0x40000];  // 256 KB work buffer
+    alignas(32) static uint8_t s_upload_work[0x80000];  // 512 KB work buffer
     alignas(4)  static uint8_t s_upload_param[k_UploadParamSize];
 
     memset(s_upload_param, 0, sizeof(s_upload_param));
@@ -471,6 +531,13 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
         meta.position_ms = position_ms;
         meta.duration_ms = duration_ms;
         s_fn_set_appdata(s_upload_param, reinterpret_cast<const uint8_t *>(&meta), sizeof(meta));
+    }
+
+    // Add pre-loaded stamps so users can place them on their drawings.
+    if (s_fn_add_stamp) {
+        for (const auto &tga : s_stamp_tgas) {
+            s_fn_add_stamp(s_upload_param, tga.data(), (uint32_t)tga.size());
+        }
     }
 
     int32_t rc = s_fn_upload_post(s_upload_param);
