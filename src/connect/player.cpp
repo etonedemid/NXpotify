@@ -82,8 +82,10 @@ void Player::run() {
             // homebrew if the RTC hasn't been mapped to Unix epoch.
             int32_t s = (int32_t)(OSGetSystemTick() / OSSecondsToTicks(1));
             if (s == 0) s = 1;  // keep non-zero sentinel
-            static_cast<Player*>(ctx)->background_since_s_.store(s);
-            WHBLogPrint("player: entered background");
+            auto *p = static_cast<Player*>(ctx);
+            p->background_since_s_.store(s);
+            p->audio_->sweep_cache_now();
+            WHBLogPrint("player: entered background — cache sweep triggered");
             return 0;
         }, this, 100);
     ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE,
