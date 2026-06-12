@@ -3,6 +3,7 @@ build/
 *.elf
 *.rpx
 *.wuhb
+*.wps
 *.map
 a.out
 
