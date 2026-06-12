@@ -635,11 +635,8 @@ void Player::handle_touch(const void *vpad_status_ptr) {
     const VPADStatus &vpad = *static_cast<const VPADStatus *>(vpad_status_ptr);
 
     VPADTouchData tp{};
-    // VPAD_TP_1280X720 returns coordinates already in TV/framebuffer space (1280×720)
-    VPADGetTPCalibratedPointEx(VPAD_CHAN_0, VPAD_TP_1280X720, &tp, &vpad.tpNormal);
-
-    const int fx = (int)tp.x;
-    const int fy = (int)tp.y;
+    // tpFiltered1 reduces resistive-touch noise; VPAD_TP_1280X720 maps directly to framebuffer space
+    VPADGetTPCalibratedPointEx(VPAD_CHAN_0, VPAD_TP_1280X720, &tp, &vpad.tpFiltered1);
 
     if (!tp.touched) {
         if (touch_.active && !touch_.consumed && spirc_) {
@@ -673,6 +670,15 @@ void Player::handle_touch(const void *vpad_status_ptr) {
         touch_ = {};
         return;
     }
+
+    // Ignore frames with invalid calibration data — garbage coordinates from the
+    // resistive panel can otherwise fire the seek zone and set consumed=true,
+    // silently swallowing the next art-tap or swipe on release.
+    if (tp.validity != VPAD_VALID)
+        return;
+
+    const int fx = (int)tp.x;
+    const int fy = (int)tp.y;
 
     if (!touch_.active) {
         touch_.active   = true;
