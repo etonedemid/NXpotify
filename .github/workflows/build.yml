@@ -45,3 +45,17 @@ jobs:
             spotify-wiiu.wuhb
             plugins/cache-sweep/spotify-cache-sweep.wps
           fail_on_unmatched_files: true
+
+      - name: Update wiiu-latest floating tag (for HBAS)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: wiiu-latest
+          name: Latest Wii U build
+          body: |
+            Always points to the latest versioned release. Current: ${{ github.ref_name }}
+          files: |
+            spotify-wiiu.wuhb
+            plugins/cache-sweep/spotify-cache-sweep.wps
+          fail_on_unmatched_files: true
+          make_latest: false
