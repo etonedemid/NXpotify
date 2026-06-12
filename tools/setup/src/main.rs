@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -176,6 +176,45 @@ fn find_sd_card() -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
+// ── WUHB download ─────────────────────────────────────────────────────────────
+
+const GITHUB_API: &str =
+    "https://api.github.com/repos/Happynico7504/spotify-wiiu/releases/latest";
+
+fn download_wuhb() -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
+    info("Fetching latest release info...");
+    let resp = ureq::get(GITHUB_API)
+        .set("User-Agent", "spotify-wiiu-setup")
+        .set("Accept", "application/vnd.github.v3+json")
+        .call()?;
+
+    let json: Value = serde_json::from_str(&resp.into_string()?)?;
+    let tag = json["tag_name"].as_str().unwrap_or("?").to_string();
+
+    let url = json["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some("spotify-wiiu.wuhb")))
+        .and_then(|x| x["browser_download_url"].as_str())
+        .ok_or("spotify-wiiu.wuhb asset not found in latest release")?
+        .to_string();
+
+    ok(&format!("Latest release: {tag}"));
+    info("Downloading spotify-wiiu.wuhb...");
+
+    let resp = ureq::get(&url)
+        .set("User-Agent", "spotify-wiiu-setup")
+        .call()?;
+
+    let mut bytes = Vec::new();
+    resp.into_reader().read_to_end(&mut bytes)?;
+
+    ok(&format!("Downloaded {} KB", bytes.len() / 1024));
+
+    let tmp = std::env::temp_dir().join("spotify-wiiu.wuhb");
+    fs::write(&tmp, &bytes)?;
+    Ok((tmp, tag))
+}
+
 // ── Subprocess reader thread ──────────────────────────────────────────────────
 
 fn spawn_log_reader(
@@ -312,6 +351,49 @@ fn main() {
                 out_abs.display()
             ));
         }
+    }
+
+    // Step 5 ── download & install wuhb ───────────────────────────────────────
+    step(5, "Installing Spotify Wii U");
+
+    let answer = prompt("  Download and install the latest spotify-wiiu.wuhb? [Y/n]: ");
+    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
+        match download_wuhb() {
+            Ok((wuhb, _tag)) => {
+                match find_sd_card() {
+                    Some(sd) => {
+                        let app_dir = sd.join("wiiu").join("apps").join("spotify-wiiu");
+                        if let Err(e) = fs::create_dir_all(&app_dir) {
+                            warn(&format!("Could not create app directory: {e}"));
+                        }
+                        let dest = app_dir.join("spotify-wiiu.wuhb");
+                        match fs::copy(&wuhb, &dest) {
+                            Ok(_) => ok(&format!("Installed to {}", dest.display())),
+                            Err(e) => {
+                                warn(&format!("Copy failed: {e}"));
+                                info(&format!(
+                                    "Copy manually:  {}  →  SD:/wiiu/apps/spotify-wiiu/spotify-wiiu.wuhb",
+                                    wuhb.display()
+                                ));
+                            }
+                        }
+                    }
+                    None => {
+                        warn("No SD card detected.");
+                        info(&format!(
+                            "Copy manually:  {}  →  SD:/wiiu/apps/spotify-wiiu/spotify-wiiu.wuhb",
+                            wuhb.display()
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                warn(&format!("Download failed: {e}"));
+                info("Get it from: https://github.com/Happynico7504/spotify-wiiu/releases/latest");
+            }
+        }
+    } else {
+        info("Skipped.");
     }
 
     // Done ─────────────────────────────────────────────────────────────────
