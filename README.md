@@ -160,7 +160,7 @@ SD:/spotify_saved_creds.bin
 The cache-sweep plugin runs at boot under Aroma and automatically purges Spotify audio cache entries older than 3 days, keeping SD card usage in check. The setup tool installs it automatically; to install manually, copy `spotify-cache-sweep.wps` to:
 
 ```
-SD:/wiiu/environments/<your-aroma-env>/modules/plugins/spotify-cache-sweep.wps
+SD:/wiiu/environments/<your-aroma-env>/plugins/spotify-cache-sweep.wps
 ```
 
 Once installed, its sweep interval (default: 60 minutes) and enable/disable toggle are configurable from the **Aroma Config Menu** (`L` + `↓` + `SELECT` on the GamePad).

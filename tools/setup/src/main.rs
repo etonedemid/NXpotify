@@ -481,7 +481,7 @@ fn main() {
                             }
                         }
 
-                        // Install cache-sweep plugin into the Aroma modules/plugins/ dir
+                        // Install cache-sweep plugin into the Aroma plugins/ dir
                         if let Some(wps) = &assets.wps {
                             if let Some(env) = &aroma_env {
                                 let plugins_dir = env.join("modules").join("plugins");
@@ -494,7 +494,7 @@ fn main() {
                                     Err(e) => {
                                         warn(&format!("Plugin copy failed: {e}"));
                                         info(&format!(
-                                            "Copy manually:  {}  →  SD:/wiiu/environments/<env>/modules/plugins/spotify-cache-sweep.wps",
+                                            "Copy manually:  {}  →  SD:/wiiu/environments/<env>/plugins/spotify-cache-sweep.wps",
                                             wps.display()
                                         ));
                                     }
@@ -502,7 +502,7 @@ fn main() {
                             } else {
                                 warn("No Aroma environment found — cannot install plugin automatically.");
                                 info(&format!(
-                                    "Copy manually:  {}  →  SD:/wiiu/environments/<env>/modules/plugins/spotify-cache-sweep.wps",
+                                    "Copy manually:  {}  →  SD:/wiiu/environments/<env>/plugins/spotify-cache-sweep.wps",
                                     wps.display()
                                 ));
                             }
@@ -516,7 +516,7 @@ fn main() {
                         ));
                         if let Some(wps) = &assets.wps {
                             info(&format!(
-                                "Copy manually:  {}  →  SD:/wiiu/environments/<env>/modules/plugins/spotify-cache-sweep.wps",
+                                "Copy manually:  {}  →  SD:/wiiu/environments/<env>/plugins/spotify-cache-sweep.wps",
                                 wps.display()
                             ));
                         }
