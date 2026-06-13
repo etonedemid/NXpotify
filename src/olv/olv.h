@@ -26,10 +26,11 @@ struct Post {
 // ── Stamp pack support ────────────────────────────────────────────────────────
 
 struct Pack {
-    std::string id;           // unique key, e.g. "official"
-    std::string name;         // display name
-    std::string description;
-    std::string base_url;     // raw base URL; stamp1.png…stampN.png appended
+    std::string              id;           // unique key, e.g. "official"
+    std::string              name;         // display name
+    std::string              description;
+    std::string              base_url;     // raw base URL; filenames from stamps[] appended
+    std::vector<std::string> stamps;       // explicit filename list; if empty, tries stamp1.png…
 };
 
 // Fetch available packs from the registry (blocking, returns empty on failure).

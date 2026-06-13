@@ -323,6 +323,11 @@ std::vector<Pack> fetch_stamp_packs() {
         };
         gs("id", p.id); gs("name", p.name);
         gs("description", p.description); gs("base_url", p.base_url);
+        cJSON *stamps = cJSON_GetObjectItem(item, "stamps");
+        cJSON *sitem  = nullptr;
+        cJSON_ArrayForEach(sitem, stamps) {
+            if (cJSON_IsString(sitem)) p.stamps.push_back(sitem->valuestring);
+        }
         if (!p.id.empty()) out.push_back(std::move(p));
     }
     cJSON_Delete(root);
@@ -350,14 +355,27 @@ int download_stamp_pack(const Pack &pack) {
     if (dir.empty()) return 0;
     makedirs(dir);
     int count = 0;
-    for (int i = 1; i <= k_MaxStamps; ++i) {
-        std::string url = pack.base_url + "stamp" + std::to_string(i) + ".png";
-        auto bytes = http_get(url);
-        if (bytes.empty()) break;
-        std::string path = dir + "/stamp" + std::to_string(i) + ".png";
-        FILE *f = fopen(path.c_str(), "wb");
-        if (f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); count = i; }
+
+    if (!pack.stamps.empty()) {
+        // Explicit filename list — download each in order, save as stamp1…stampN.
+        for (int i = 0; i < (int)pack.stamps.size() && i < k_MaxStamps; ++i) {
+            auto bytes = http_get(pack.base_url + pack.stamps[i]);
+            if (bytes.empty()) continue;
+            std::string path = dir + "/stamp" + std::to_string(i + 1) + ".png";
+            FILE *f = fopen(path.c_str(), "wb");
+            if (f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); count = i + 1; }
+        }
+    } else {
+        // No list — assume sequential stamp1.png…stampN.png naming.
+        for (int i = 1; i <= k_MaxStamps; ++i) {
+            auto bytes = http_get(pack.base_url + "stamp" + std::to_string(i) + ".png");
+            if (bytes.empty()) break;
+            std::string path = dir + "/stamp" + std::to_string(i) + ".png";
+            FILE *f = fopen(path.c_str(), "wb");
+            if (f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); count = i; }
+        }
     }
+
     WHBLogPrintf("olv: downloaded %d stamps to %s", count, dir.c_str());
     return count;
 }

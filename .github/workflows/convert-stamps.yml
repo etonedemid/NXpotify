@@ -53,6 +53,44 @@ jobs:
           print(f'Converted {len(files)} stamp(s)')
           EOF
 
+      - name: Update packs.json stamp list
+        run: |
+          python3 - <<'EOF'
+          import json, os
+
+          stamp_files = sorted(
+              f for f in os.listdir('stamps')
+              if f.startswith('stamp') and f.endswith('.png')
+          )
+
+          repo = 'Happynico7504/spotify-wiiu-miiverse-stamps'
+          packs_path = f'_stamps-source/packs.json'
+          with open(packs_path) as f:
+              data = json.load(f)
+
+          for pack in data['packs']:
+              if pack['id'] == 'official':
+                  pack['stamps'] = stamp_files
+
+          with open(packs_path, 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+
+          print(f'Updated packs.json with {len(stamp_files)} stamps')
+          EOF
+
+      - name: Push updated packs.json to stamps repo
+        run: |
+          SHA=$(gh api repos/Happynico7504/spotify-wiiu-miiverse-stamps/contents/packs.json --jq '.sha')
+          CONTENT=$(base64 -w 0 _stamps-source/packs.json)
+          gh api repos/Happynico7504/spotify-wiiu-miiverse-stamps/contents/packs.json \
+            -X PUT \
+            -f message="chore: update official pack stamp list" \
+            -f content="$CONTENT" \
+            -f sha="$SHA"
+        env:
+          GH_TOKEN: ${{ secrets.STAMPS_REPO_TOKEN }}
+
       - name: Check for changes
         id: diff
         run: |
