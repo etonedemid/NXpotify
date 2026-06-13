@@ -525,8 +525,28 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
     alignas(32) static uint8_t s_upload_param[k_UploadParamSize];
 
     memset(s_upload_param, 0, sizeof(s_upload_param));
+    WHBLogPrintf("olv: ctor=%p stamp=%p",
+                 reinterpret_cast<void *>(s_fn_ctor_upload),
+                 reinterpret_cast<void *>(s_fn_add_stamp));
     s_fn_ctor_upload(s_upload_param);
+    // Log param[0..31] immediately after ctor, before any setter touches it.
+    {
+        const uint8_t *p = s_upload_param;
+        WHBLogPrintf("olv: post-ctor [0..15]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+            p[0],p[1],p[2],p[3], p[4],p[5],p[6],p[7],
+            p[8],p[9],p[10],p[11], p[12],p[13],p[14],p[15]);
+        WHBLogPrintf("olv: post-ctor [16..31]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+            p[16],p[17],p[18],p[19], p[20],p[21],p[22],p[23],
+            p[24],p[25],p[26],p[27], p[28],p[29],p[30],p[31]);
+    }
     s_fn_set_work(s_upload_param, s_upload_work, sizeof(s_upload_work));
+    // Test stamp 0 RIGHT AFTER SetWork, before any other setter.
+    // If this works but the later loop fails, a setter is corrupting the struct.
+    if (s_fn_add_stamp && s_stamp_count > 0) {
+        DCFlushRange(s_stamp_bufs[0], k_StampTgaSize);
+        int32_t sr0 = s_fn_add_stamp(s_upload_param, s_stamp_bufs[0], k_StampTgaSize);
+        WHBLogPrintf("olv: AddStampData[early] → 0x%08X", (uint32_t)sr0);
+    }
     if (s_fn_set_community)
         s_fn_set_community(s_upload_param, COMMUNITY_ID);
 
