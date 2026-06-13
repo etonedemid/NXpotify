@@ -194,8 +194,10 @@ static std::vector<uint8_t> make_stamp_tga(const uint8_t *src, int src_w, int sr
     std::vector<uint8_t> tga(HDR + SW * SH * 4 + FOOTER, 0);
     // Header
     tga[2]  = 2;                        // image type: uncompressed true-color
-    tga[12] = SW & 0xFF; tga[13] = 0;  // width
-    tga[14] = SH & 0xFF; tga[15] = 0;  // height
+    // Wii U is big-endian PPC; nn_olv reads these as native u16 without
+    // byte-swapping, so store width/height in big-endian (not TGA-standard LE).
+    tga[12] = 0; tga[13] = SW & 0xFF;  // width  (BE: 0x0064 = 100)
+    tga[14] = 0; tga[15] = SH & 0xFF;  // height (BE: 0x0064 = 100)
     tga[16] = 32;                       // bits per pixel
     tga[17] = 0x08;                     // bottom-left origin, 8 alpha bits
     // Pixels (RGBA → BGRA, converted to grayscale per Roséverse dev requirement)
@@ -205,9 +207,10 @@ static std::vector<uint8_t> make_stamp_tga(const uint8_t *src, int src_w, int sr
         for (int x = 0; x < SW; ++x) {
             int sx = x * src_w / SW;
             const uint8_t *s = src + (sy * src_w + sx) * 4;
-            // Threshold to pure black/white (luminance > 127 → white, else black)
-            uint8_t L = ((s[0] * 77 + s[1] * 150 + s[2] * 29) >> 8) > 127 ? 255 : 0;
-            dst[0] = L; dst[1] = L; dst[2] = L; dst[3] = s[3];
+            // Threshold to black/transparent: dark pixels → opaque black,
+            // light pixels → fully transparent (PNG has no alpha; white = background).
+            bool isLight = ((s[0] * 77 + s[1] * 150 + s[2] * 29) >> 8) > 127;
+            dst[0] = 0; dst[1] = 0; dst[2] = 0; dst[3] = isLight ? 0 : 255;
             dst += 4;
         }
     }
