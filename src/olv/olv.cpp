@@ -512,12 +512,11 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
         return;
     }
 
-    // UploadPostDataByPostAppParam — use a generous allocation; the stamp count
-    // field lives inside the struct (not the work buffer), and if the struct is
-    // larger than our buffer AddStampData writes the count out-of-bounds and the
-    // applet reads back 0 stamps → no stamp button.  0x200 covers the struct
-    // comfortably on all known firmware versions.
-    static constexpr uint32_t k_UploadParamSize = 0x200;
+    // UploadPostDataByPostAppParam true size (from Cafe SDK constants):
+    //   u16 bodyText[256]=512, topicTag[152]=304, searchKeys[5][152]=1520,
+    //   other fields ~100, private reserved[508] → total ≈ 2944 bytes.
+    // Use 0x1000 (4096) so stamp descriptor entries for all 8 stamps fit.
+    static constexpr uint32_t k_UploadParamSize = 0x1000;
     alignas(32) static uint8_t s_upload_work[0x80000];  // 512 KB work buffer
     alignas(4)  static uint8_t s_upload_param[k_UploadParamSize];
 
