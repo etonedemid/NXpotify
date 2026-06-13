@@ -186,7 +186,7 @@ static std::vector<uint8_t> make_stamp_tga(const uint8_t *src, int src_w, int sr
     tga[12] = SW & 0xFF; tga[13] = 0;
     tga[14] = SH & 0xFF; tga[15] = 0;
     tga[16] = 32;
-    tga[17] = 0x28;  // top-left origin (bit 5), 8 alpha bits
+    tga[17] = 0x08;  // standard bottom-left origin, 8 alpha bits
     uint8_t *dst = tga.data() + HDR;
     for (int y = 0; y < SH; ++y) {
         int sy = y * src_h / SH;
@@ -536,16 +536,11 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
     }
 
     // Add pre-loaded stamps so users can place them on their drawings.
-    // AddStampData expects raw BGRA pixels (100×100 = 40000 bytes), not a TGA file,
-    // so skip the 18-byte TGA header we prepend for storage convenience.
+    // AddStampData expects a full TGA file (header + pixels).
     if (s_fn_add_stamp) {
-        constexpr uint32_t TGA_HDR = 18;
         int added = 0;
         for (const auto &tga : s_stamp_tgas) {
-            if (tga.size() <= TGA_HDR) continue;
-            int32_t sr = s_fn_add_stamp(s_upload_param,
-                                        tga.data() + TGA_HDR,
-                                        (uint32_t)(tga.size() - TGA_HDR));
+            int32_t sr = s_fn_add_stamp(s_upload_param, tga.data(), (uint32_t)tga.size());
             if (sr == 0 || (uint32_t)sr == 0x01100080u) ++added;
             else WHBLogPrintf("olv: AddStampData[%d] → 0x%08X", added, (uint32_t)sr);
         }
