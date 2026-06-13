@@ -895,6 +895,13 @@ void Spirc::handle_dealer_message(const std::string &uri,
     // full reload (repeat-track behaviour).
     if (cs.track_uri == current_track_uri_ && !playing_ && cs.is_playing
             && started_playing_at_ms_ > 0) {
+        if (local_pause_pending_.exchange(false)) {
+            // Stale cluster echo from an in-flight PUT that landed before our pause
+            // PUT — re-assert paused state and ignore the resume signal.
+            WHBLogPrint("spirc: cluster resume suppressed (local pause pending)");
+            put_connect_state_async(4, false, pos_ms_, vol_pct_);
+            return;
+        }
         WHBLogPrintf("spirc: cluster resume @%ldms", (long)cs.position_ms);
         playing_ = true;
         pos_ms_  = (int)cs.position_ms;
@@ -905,6 +912,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
 
     // Suppress cluster echoes of our own state.
     if (cs.track_uri == current_track_uri_ && (playing_ || !cs.is_playing)) {
+        if (!cs.is_playing) local_pause_pending_.store(false);  // cluster confirmed paused
         // Periodic keepalive PUT if we haven't pushed recently.
         int64_t now_ms = now_ms_wiiu();
         if (helo_done_.load() && now_ms - last_state_push_ms_ >= 30000)
@@ -1030,6 +1038,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         put_connect_state_async(4, false, pos_ms_, vol_pct_);
 
     } else if (strcmp(ep, "resume") == 0) {
+        local_pause_pending_.store(false);
         playing_ = true;
         if (started_playing_at_ms_ == 0)
             started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
@@ -1367,6 +1376,7 @@ void Spirc::send_notify(bool playing, int pos_ms, int vol_pct) {
 void Spirc::notify(bool playing, int pos_ms, int vol_pct) {
     bool playing_changed = (playing != playing_);
     bool vol_changed     = (vol_pct  != vol_pct_);
+    if (playing_changed) local_pause_pending_.store(!playing);
     playing_ = playing; pos_ms_ = pos_ms; vol_pct_ = vol_pct;
     if (playing_changed && callbacks_.on_playing_changed)
         callbacks_.on_playing_changed(playing, pos_ms);

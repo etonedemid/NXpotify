@@ -217,6 +217,7 @@ private:
     int64_t           last_state_push_ms_ = 0; // Unix ms of most-recent put_connect_state_async
     std::atomic<int>  push_inflight_{0};       // 0=idle, 1=PUT inflight (at most one at a time)
     std::atomic<bool> dirty_push_{false};      // state changed while a PUT was inflight
+    std::atomic<bool> local_pause_pending_{false}; // player pressed pause; suppress stale cluster resume echo
 
     // Dealer WebSocket — provides the connection_id for connect-state
     Dealer            dealer_;
