@@ -105,7 +105,6 @@ static FnSetSearchKey  s_fn_set_search     = nullptr;
 static FnSetCommunityId s_fn_set_community = nullptr;
 static FnSetAppData    s_fn_set_appdata    = nullptr;
 static FnAddStampData  s_fn_add_stamp      = nullptr;
-static FnAddStampData  s_fn_add_stamp_base = nullptr;  // base-class version
 static FnUploadPost    s_fn_upload_post    = nullptr;
 
 // Pre-encoded stamp TGAs loaded from /vol/content/stamps/ at init time.
@@ -343,12 +342,9 @@ bool init() {
         "AddStampData__Q3_2nn3olv28UploadPostDataByPostAppParamFPCUcUi",
         reinterpret_cast<void **>(&s_fn_add_stamp));
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
-        "AddStampData__Q3_2nn3olv15UploadParamBaseFPCUcUi",
-        reinterpret_cast<void **>(&s_fn_add_stamp_base));
-    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "UploadPostDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv28UploadPostDataByPostAppParam",
         reinterpret_cast<void **>(&s_fn_upload_post));
-    WHBLogPrintf("olv: post applet ctor=%s work=%s body=%s flags=%s topic=%s search=%s community=%s appdata=%s stamp=%s stamp_base=%s upload=%s",
+    WHBLogPrintf("olv: post applet ctor=%s work=%s body=%s flags=%s topic=%s search=%s community=%s appdata=%s stamp=%s upload=%s",
                  s_fn_ctor_upload    ? "ok" : "missing",
                  s_fn_set_work       ? "ok" : "missing",
                  s_fn_set_body       ? "ok" : "missing",
@@ -358,7 +354,6 @@ bool init() {
                  s_fn_set_community  ? "ok" : "missing",
                  s_fn_set_appdata    ? "ok" : "missing",
                  s_fn_add_stamp      ? "ok" : "missing",
-                 s_fn_add_stamp_base ? "ok" : "missing",
                  s_fn_upload_post    ? "ok" : "missing");
 
     // Initialize the network/SSL/account stack before calling nn_olv::Initialize.
@@ -537,20 +532,7 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
     alignas(32) static uint8_t s_upload_param[k_UploadParamSize];
 
     memset(s_upload_param, 0, sizeof(s_upload_param));
-    WHBLogPrintf("olv: ctor=%p stamp=%p",
-                 reinterpret_cast<void *>(s_fn_ctor_upload),
-                 reinterpret_cast<void *>(s_fn_add_stamp));
     s_fn_ctor_upload(s_upload_param);
-    // Log param[0..31] immediately after ctor, before any setter touches it.
-    {
-        const uint8_t *p = s_upload_param;
-        WHBLogPrintf("olv: post-ctor [0..15]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
-            p[0],p[1],p[2],p[3], p[4],p[5],p[6],p[7],
-            p[8],p[9],p[10],p[11], p[12],p[13],p[14],p[15]);
-        WHBLogPrintf("olv: post-ctor [16..31]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
-            p[16],p[17],p[18],p[19], p[20],p[21],p[22],p[23],
-            p[24],p[25],p[26],p[27], p[28],p[29],p[30],p[31]);
-    }
     s_fn_set_work(s_upload_param, s_upload_work, sizeof(s_upload_work));
     if (s_fn_set_community)
         s_fn_set_community(s_upload_param, COMMUNITY_ID);
@@ -588,42 +570,15 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
     }
 
     // Add pre-loaded stamps so users can place them on their drawings.
-    // Buffers are 32-byte aligned static arrays; AddStampData gets full TGA (header + pixels).
     if (s_fn_add_stamp && s_stamp_count > 0) {
-        // Log stamp 0 header and footer to verify TGA is correct in the buffer.
-        const uint8_t *b0 = s_stamp_bufs[0];
-        WHBLogPrintf("olv: stamp0 hdr type=%d w=%d h=%d bpp=%d desc=0x%02X",
-            b0[2], b0[12]|(b0[13]<<8), b0[14]|(b0[15]<<8), b0[16], b0[17]);
-        const uint8_t *f0 = b0 + 40018;
-        WHBLogPrintf("olv: stamp0 ftr off=%02X%02X%02X%02X%02X%02X%02X%02X sig=%c%c%c%c%c%c%c%c",
-            f0[0],f0[1],f0[2],f0[3],f0[4],f0[5],f0[6],f0[7],
-            f0[8],f0[9],f0[10],f0[11],f0[12],f0[13],f0[14],f0[15]);
-        // Log first 8 bytes of param (vtable + flags) to verify ctor ran.
-        const uint8_t *p = s_upload_param;
-        WHBLogPrintf("olv: param[0..7]=%02X%02X%02X%02X %02X%02X%02X%02X",
-            p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
-
         int added = 0;
-        // Try derived-class AddStampData; fall back to base-class version.
-        FnAddStampData fn = s_fn_add_stamp ? s_fn_add_stamp : s_fn_add_stamp_base;
-        WHBLogPrintf("olv: using %s AddStampData",
-                     s_fn_add_stamp ? "derived" : (s_fn_add_stamp_base ? "base" : "NONE"));
-        for (int i = 0; i < s_stamp_count && fn; ++i) {
+        for (int i = 0; i < s_stamp_count; ++i) {
             DCFlushRange(s_stamp_bufs[i], k_StampTgaSize);
-            int32_t sr = fn(s_upload_param, s_stamp_bufs[i], k_StampTgaSize);
+            int32_t sr = s_fn_add_stamp(s_upload_param, s_stamp_bufs[i], k_StampTgaSize);
             if (sr == 0 || (uint32_t)sr == 0x01100080u) ++added;
             else WHBLogPrintf("olv: AddStampData[%d] → 0x%08X", i, (uint32_t)sr);
         }
-        // If derived failed for all, retry with base class
-        if (added == 0 && s_fn_add_stamp && s_fn_add_stamp_base) {
-            WHBLogPrintf("olv: retrying with base AddStampData");
-            for (int i = 0; i < s_stamp_count; ++i) {
-                int32_t sr = s_fn_add_stamp_base(s_upload_param, s_stamp_bufs[i], k_StampTgaSize);
-                if (sr == 0 || (uint32_t)sr == 0x01100080u) ++added;
-                else WHBLogPrintf("olv: BaseStampData[%d] → 0x%08X", i, (uint32_t)sr);
-            }
-        }
-        WHBLogPrintf("olv: %d/%d stamps added to param", added, s_stamp_count);
+        WHBLogPrintf("olv: %d/%d stamps added", added, s_stamp_count);
     }
 
     int32_t rc = s_fn_upload_post(s_upload_param);
