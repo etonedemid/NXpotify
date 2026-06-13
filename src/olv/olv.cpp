@@ -199,9 +199,11 @@ static std::vector<uint8_t> make_stamp_tga(const uint8_t *src, int src_w, int sr
     tga[16] = 32;                       // bits per pixel
     tga[17] = 0x08;                     // descriptor: bottom-left, 8 alpha bits
     // Pixels (RGBA → BGRA, converted to grayscale per Roséverse dev requirement)
+    // TGA bottom-left origin: row 0 in file = bottom row of image.
+    // stbi returns top-row-first, so write in reverse Y order.
     uint8_t *dst = tga.data() + HDR;
     for (int y = 0; y < SH; ++y) {
-        int sy = y * src_h / SH;
+        int sy = (src_h - 1) - y * src_h / SH;
         for (int x = 0; x < SW; ++x) {
             int sx = x * src_w / SW;
             const uint8_t *s = src + (sy * src_w + sx) * 4;
