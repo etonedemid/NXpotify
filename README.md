@@ -16,7 +16,7 @@ An unofficial [Spotify Connect](https://www.spotify.com/connect/) client for the
 - **Spectrum visualizer**
 - **GamePad touchscreen** — tap album art to play/pause, swipe left/right to skip, drag the progress bar to seek
 - **Multi-controller support** — GamePad, Wii Remote, and Pro Controller all work
-- **Roséverse integration** — shows community posts for the current track; `Stick R` opens the post directly in Miiverse, `Stick L` lets you post a reaction
+- **Roséverse integration** — shows community posts for the current track; `Stick R` opens the post directly in Miiverse, `Stick L` lets you post a reaction with custom stamps (contribute stamps at [spotify-wiiu-miiverse-stamps](https://github.com/Happynico7504/spotify-wiiu-miiverse-stamps))
 - **Cache-sweep plugin** — optional Aroma plugin that automatically purges stale audio cache at boot and on a configurable interval, keeping your SD card tidy
 
 ## Controls
