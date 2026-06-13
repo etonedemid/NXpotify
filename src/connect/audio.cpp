@@ -362,7 +362,7 @@ void AudioPipeline::decode_thread_fn() {
         std::vector<uint8_t> tmp;
         if (!fetch_range(ctx.cdn_url, 0, CHUNK_SIZE - 1, tmp, sz, &stop_flag_) || sz == 0) {
             WHBLogPrint("audio: initial fetch failed");
-            if (on_track_end) on_track_end();
+            if (!stop_flag_.load() && on_track_end) on_track_end();
             return;
         }
         ctx.file_size = sz;
