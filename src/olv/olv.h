@@ -30,7 +30,7 @@ struct Pack {
     std::string              name;         // display name
     std::string              description;
     std::string              base_url;     // raw base URL; filenames from stamps[] appended
-    std::vector<std::string> stamps;       // explicit filename list; if empty, tries stamp1.png…
+    std::vector<std::string> stamps;       // explicit filename list; must be non-empty
 };
 
 // Fetch available packs from the registry (blocking, returns empty on failure).

@@ -28,15 +28,21 @@ jobs:
         run: |
           python3 - <<'EOF'
           from PIL import Image
-          import os, json
+          import os, json, io
 
           src = 'stamps-repo'
           exts = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'}
           skip = {'packs.json'}
-          files = sorted(
+          filenames = sorted(
               f for f in os.listdir(src)
               if os.path.splitext(f)[1].lower() in exts and f not in skip
           )
+
+          # Read all source images into memory before any wipe
+          images = []
+          for fname in filenames:
+              with open(os.path.join(src, fname), 'rb') as fh:
+                  images.append((fname, fh.read()))
 
           # Wipe existing converted stamp*.png to reflect deletes
           for f in os.listdir(src):
@@ -44,9 +50,9 @@ jobs:
                   os.remove(os.path.join(src, f))
 
           converted = []
-          for i, fname in enumerate(files, 1):
+          for i, (fname, raw) in enumerate(images, 1):
               out = f'stamp{i}.png'
-              img = Image.open(os.path.join(src, fname)).convert('L')
+              img = Image.open(io.BytesIO(raw)).convert('L')
               img = img.resize((100, 100), Image.LANCZOS)
               img = img.point(lambda p: 255 if p > 127 else 0)
               img.convert('RGB').save(os.path.join(src, out))

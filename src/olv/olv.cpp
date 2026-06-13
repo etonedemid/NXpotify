@@ -354,24 +354,12 @@ int download_stamp_pack(const Pack &pack) {
     makedirs(dir);
     int count = 0;
 
-    if (!pack.stamps.empty()) {
-        // Explicit filename list — download each in order, save as stamp1…stampN.
-        for (int i = 0; i < (int)pack.stamps.size() && i < k_MaxStamps; ++i) {
-            auto bytes = http_get(pack.base_url + pack.stamps[i]);
-            if (bytes.empty()) continue;
-            std::string path = dir + "/stamp" + std::to_string(i + 1) + ".png";
-            FILE *f = fopen(path.c_str(), "wb");
-            if (f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); count = i + 1; }
-        }
-    } else {
-        // No list — assume sequential stamp1.png…stampN.png naming.
-        for (int i = 1; i <= k_MaxStamps; ++i) {
-            auto bytes = http_get(pack.base_url + "stamp" + std::to_string(i) + ".png");
-            if (bytes.empty()) break;
-            std::string path = dir + "/stamp" + std::to_string(i) + ".png";
-            FILE *f = fopen(path.c_str(), "wb");
-            if (f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); count = i; }
-        }
+    for (int i = 0; i < (int)pack.stamps.size() && i < k_MaxStamps; ++i) {
+        auto bytes = http_get(pack.base_url + pack.stamps[i]);
+        if (bytes.empty()) continue;
+        std::string path = dir + "/stamp" + std::to_string(i + 1) + ".png";
+        FILE *f = fopen(path.c_str(), "wb");
+        if (f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); count = i + 1; }
     }
 
     WHBLogPrintf("olv: downloaded %d stamps to %s", count, dir.c_str());
