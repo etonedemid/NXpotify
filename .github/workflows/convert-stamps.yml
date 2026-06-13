@@ -1,0 +1,64 @@
+name: Convert Stamps
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  repository_dispatch:
+    types: [stamps-updated]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch stamps source repo
+        uses: actions/checkout@v4
+        with:
+          repository: Happynico7504/spotify-wiiu-miiverse-stamps
+          path: _stamps-source
+
+      - name: Install Pillow
+        run: pip install Pillow --quiet
+
+      - name: Convert and rename stamps
+        run: |
+          python3 - <<'EOF'
+          from PIL import Image
+          import os
+
+          src = '_stamps-source'
+          exts = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'}
+          files = sorted(
+              f for f in os.listdir(src)
+              if os.path.splitext(f)[1].lower() in exts
+          )
+
+          for i, fname in enumerate(files, 1):
+              img = Image.open(os.path.join(src, fname)).convert('L')
+              img = img.resize((100, 100), Image.LANCZOS)
+              img = img.point(lambda p: 255 if p > 127 else 0)
+              img.convert('RGB').save(f'stamps/stamp{i}.png')
+              print(f'  {fname} -> stamp{i}.png')
+
+          print(f'Converted {len(files)} stamp(s)')
+          EOF
+
+      - name: Check for changes
+        id: diff
+        run: |
+          git diff --quiet stamps/ && echo "changed=false" >> $GITHUB_OUTPUT \
+            || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add stamps/
+          git commit -m "chore(stamps): convert from spotify-wiiu-miiverse-stamps"
+          git push

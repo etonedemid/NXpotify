@@ -1,11 +1,10 @@
-name: Sync Stamps
+name: Sync Stamps to Content
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
-  repository_dispatch:
-    types: [stamps-updated]
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'stamps/**'
 
 permissions:
   contents: write
@@ -16,25 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch stamps from stamps repo
-        uses: actions/checkout@v4
-        with:
-          repository: Happynico7504/spotify-wiiu-miiverse-stamps
-          path: _stamps-source
+      - name: Copy stamps to content/stamps
+        run: cp stamps/*.png content/stamps/
 
       - name: Check for changes
         id: diff
         run: |
-          if diff -rq --include='*.png' _stamps-source/ content/stamps/ > /dev/null 2>&1; then
-            echo "changed=false" >> $GITHUB_OUTPUT
-          else
-            echo "changed=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Sync stamps
-        if: steps.diff.outputs.changed == 'true'
-        run: |
-          cp _stamps-source/*.png content/stamps/
+          git diff --quiet && echo "changed=false" >> $GITHUB_OUTPUT \
+            || echo "changed=true" >> $GITHUB_OUTPUT
 
       - name: Commit and push
         if: steps.diff.outputs.changed == 'true'
@@ -42,5 +30,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add content/stamps/
-          git commit -m "chore(stamps): sync from spotify-wiiu-miiverse-stamps"
+          git commit -m "chore(stamps): sync content/stamps from stamps/"
           git push
