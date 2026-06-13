@@ -9,7 +9,7 @@ body:
         Thanks for taking the time to report this! The more detail you provide, the faster it can be fixed.
 
         **Before you start:** make sure you are running the latest release from the
-        [releases page](../../releases).
+        [releases page](../../../../releases).
 
   - type: textarea
     id: description
