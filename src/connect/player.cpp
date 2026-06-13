@@ -874,6 +874,7 @@ void Player::olv_show_current() {
 void Player::olv_fetch(uint32_t cid) {
     // Prefer ISRC (region-neutral) over track ID; fall back if Spotify didn't provide one.
     std::string cur_key = isrc_.empty() ? track_id_ : isrc_;
+    if (cur_key.empty()) { olv_fetching_ = false; return; }
     auto posts = OLV::fetch_posts(cid, 5, cur_key);
 
     {
