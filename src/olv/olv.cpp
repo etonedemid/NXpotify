@@ -54,6 +54,7 @@ static bool             s_available = false;
 using FnDownloadPosts    = int32_t (*)(void *, void *, uint32_t *, uint32_t, const DownloadParam *);
 using FnCtor             = void    (*)(void *);
 using FnDLSetUi          = int32_t (*)(void *, uint32_t);
+using FnDLSetUc          = int32_t (*)(void *, uint8_t);
 using FnDLSetSearchKey   = int32_t (*)(void *, const uint16_t *, uint8_t);
 using FnGetBodyText      = int32_t (*)(const void *, uint16_t *, uint32_t);  // GetBodyText(wchar_t*, u32)
 using FnGetMiiNickname   = const uint16_t * (*)(const void *);               // GetMiiNickname() → const wchar_t*
@@ -65,6 +66,7 @@ static FnCtor            s_fn_ctor_post        = nullptr;
 static FnCtor            s_fn_ctor_topic       = nullptr;
 static FnDLSetUi         s_fn_dl_set_community = nullptr;
 static FnDLSetUi         s_fn_dl_set_max_num   = nullptr;
+static FnDLSetUc         s_fn_dl_set_language  = nullptr;
 static FnDLSetSearchKey  s_fn_dl_set_search    = nullptr;
 static FnGetBodyText     s_fn_get_body_text    = nullptr;
 static FnGetMiiNickname  s_fn_get_mii_nickname = nullptr;
@@ -227,6 +229,9 @@ bool init() {
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "SetPostDataMaxNum__Q3_2nn3olv25DownloadPostDataListParamFUi",
         reinterpret_cast<void **>(&s_fn_dl_set_max_num));
+    OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
+        "SetLanguageId__Q3_2nn3olv25DownloadPostDataListParamFUc",
+        reinterpret_cast<void **>(&s_fn_dl_set_language));
     OSDynLoad_FindExport(s_handle, OS_DYNLOAD_EXPORT_FUNC,
         "SetSearchKey__Q3_2nn3olv25DownloadPostDataListParamFPCwUc",
         reinterpret_cast<void **>(&s_fn_dl_set_search));
@@ -417,6 +422,7 @@ std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit,
             DownloadParam param = {};
             if (s_fn_dl_set_community) s_fn_dl_set_community(&param, community_id);
             if (s_fn_dl_set_max_num)   s_fn_dl_set_max_num(&param, limit);
+            if (s_fn_dl_set_language)  s_fn_dl_set_language(&param, 254);  // 254 = all languages
             if (!search_key.empty() && s_fn_dl_set_search) {
                 auto sk16 = utf8_to_utf16(search_key, 64);
                 s_fn_dl_set_search(&param, sk16.data(), 0);
