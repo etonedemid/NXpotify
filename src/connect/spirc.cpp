@@ -876,6 +876,9 @@ void Spirc::handle_dealer_message(const std::string &uri,
     WHBLogPrintf("spirc: cluster upd active='%.20s' track='%.60s' playing=%d",
                  cs.active_device_id.c_str(), cs.track_uri.c_str(), (int)cs.is_playing);
 
+    // Empty active_device_id means the cluster update carried no device info — ignore.
+    if (cs.active_device_id.empty()) return;
+
     if (cs.active_device_id != device_id_) {
         WHBLogPrintf("spirc: cluster skip: active='%.40s' ours='%.40s'",
                      cs.active_device_id.c_str(), device_id_.c_str());
