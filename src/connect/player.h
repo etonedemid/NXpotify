@@ -72,11 +72,8 @@ private:
     // Show a stamp pack picker overlay; returns false if user cancelled.
     bool show_stamp_pack_picker();
 
-    void kill_connection();   // drop AP/Spirc after background timeout
-
     enum class State { WaitingForUser, Connecting, Ready, Playing };
     std::atomic<State>    state_{State::WaitingForUser};
-    std::atomic<int32_t>  background_since_s_{0};  // 0 = foreground; nonzero = Unix s entered bg
 
     Discovery::Zeroconf              zeroconf_;
     std::unique_ptr<AP>              ap_;
@@ -104,7 +101,6 @@ private:
     std::thread           olv_init_thread_;
     std::thread           olv_fetch_thread_;
     std::atomic<bool>     olv_fetching_{false};
-    std::atomic<bool>     in_olv_applet_{false};  // true while Miiverse post applet is open
     void olv_show_current();        // push current post to display (call under olv_mu_)
     void olv_fetch(uint32_t cid);   // blocking fetch, runs on olv_fetch_thread_
 

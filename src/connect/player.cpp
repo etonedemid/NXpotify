@@ -73,35 +73,19 @@ void Player::run() {
     KPADInit();
     WPADEnableURCC(TRUE);  // must be called explicitly to allow Pro Controllers to connect
 
-    // Kill connection after this many seconds in the background (HOME menu, etc.)
-    static constexpr int32_t BG_KILL_SECS = 180;
-
     ProcUIRegisterCallback(PROCUI_CALLBACK_RELEASE,
-        [](void *ctx) -> uint32_t {
-            // Use OSGetSystemTick()-based seconds — time() may return 0 on Wii U
-            // homebrew if the RTC hasn't been mapped to Unix epoch.
-            int32_t s = (int32_t)(OSGetSystemTick() / OSSecondsToTicks(1));
-            if (s == 0) s = 1;  // keep non-zero sentinel
-            auto *p = static_cast<Player*>(ctx);
-            p->background_since_s_.store(s);
+        [](void *) -> uint32_t {
+            WHBLogPrint("player: entered background");
             // Signal the cache-sweep WUPS plugin to run a sweep.
             FILE *flag = fopen("/vol/external01/spotify_cache/.sweep_now", "w");
             if (flag) fclose(flag);
-            WHBLogPrintf("player: entered background (uptime=%ds)", s);
             return 0;
-        }, this, 100);
+        }, nullptr, 100);
     ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE,
-        [](void *ctx) -> uint32_t {
-            auto *p = static_cast<Player*>(ctx);
-            int32_t bg = p->background_since_s_.load();
-            int32_t now_s = (int32_t)(OSGetSystemTick() / OSSecondsToTicks(1));
-            p->background_since_s_.store(0);
-            if (bg != 0)
-                WHBLogPrintf("player: returned to foreground (was bg for ~%ds)", now_s - bg);
-            else
-                WHBLogPrint("player: returned to foreground");
+        [](void *) -> uint32_t {
+            WHBLogPrint("player: returned to foreground");
             return 0;
-        }, this, 100);
+        }, nullptr, 100);
 
     if (!display_.init(font_path))
         WHBLogPrint("player: display init failed");
@@ -145,30 +129,6 @@ void Player::run() {
 
     WHBLogPrint("player: waiting for Spotify app...");
 
-    // WHBProcIsRunning() blocks while in background, so the main loop never
-    // reaches the kill check while HOME menu is open. Run it on its own thread.
-    std::atomic<bool> watchdog_stop{false};
-    std::thread watchdog([&]() {
-        OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-        while (!watchdog_stop.load()) {
-            for (int i = 0; i < 5 && !watchdog_stop.load(); ++i)
-                OSSleepTicks(OSSecondsToTicks(1));
-            int32_t bg = background_since_s_.load();
-            int32_t now_s = (int32_t)(OSGetSystemTick() / OSSecondsToTicks(1));
-            if (bg != 0 && state_.load() != State::WaitingForUser
-                        && !in_olv_applet_.load()) {
-                if (ProcUIInForeground()) {
-                    // RELEASE fired but ACQUIRE never cleared the flag — stale timer.
-                    background_since_s_.store(0);
-                } else if (now_s - bg >= BG_KILL_SECS) {
-                    WHBLogPrintf("player: background timeout (%ds elapsed) — dropping connection",
-                                 now_s - bg);
-                    background_since_s_.store(0);
-                    kill_connection();
-                }
-            }
-        }
-    });
 
     VPADStatus    vpad{};
     VPADReadError verr{};
@@ -276,12 +236,8 @@ void Player::run() {
         OSSleepTicks(OSMillisecondsToTicks(16));
     }
 
-    watchdog_stop.store(true);
-    watchdog.join();
-
     // Disconnect AP first — shutdown(fd_) unblocks any recv_exact in the
     // connect thread, causing it to exit quickly.
-    // kill_connection() may have already cleaned up ap_ and connect_thread_.
     if (ap_) ap_->disconnect();
     if (connect_thread_.joinable()) connect_thread_.join();
     zeroconf_.stop();
@@ -309,7 +265,6 @@ void Player::on_credentials(Discovery::Credentials creds) {
     state_.store(State::Connecting);
 
     // Clean up any previous connection (join defunct recv thread, close fd).
-    // ap_ may be null if kill_connection() already reset it (background timeout).
     if (spirc_) { spirc_->stop(); spirc_.reset(); }
     reconnecting_.store(true);
     if (ap_) ap_->disconnect();
@@ -323,8 +278,7 @@ void Player::on_credentials(Discovery::Credentials creds) {
     acb.on_disconnect = [this] {
         // Do NOT touch spirc_ here — on_credentials may have already reset it
         // before calling ap_->disconnect(), or may be in the middle of creating
-        // a new one.  Spirc cleanup is always handled by on_credentials /
-        // kill_connection under connect_mu_.
+        // a new one.  Spirc cleanup is always handled by on_credentials under connect_mu_.
         WHBLogPrint("player: AP disconnected");
         state_.store(State::WaitingForUser);
         audio_->stop();
@@ -401,28 +355,6 @@ void Player::on_credentials(Discovery::Credentials creds) {
     const std::string &canon = ap_->canonical_username();
     zeroconf_.set_active_user(canon);
     WHBLogPrintf("player: connected as '%s'", canon.c_str());
-}
-
-// ── Background-timeout disconnect ────────────────────────────────────────────
-
-void Player::kill_connection() {
-    // Stop audio first so on_track_end can't fire after spirc_ is gone.
-    audio_->stop();
-    spirc_playing_ = false;
-    track_dur_ms_  = 0;
-
-    // Stop Spirc (sends Goodbye, tears down Dealer thread).
-    if (spirc_) { spirc_->stop(); spirc_.reset(); }
-
-    // Disconnect AP (unblocks the recv thread).
-    if (ap_) { ap_->disconnect(); ap_.reset(); }
-
-    // Join the connect thread so any in-progress on_credentials finishes cleanly.
-    if (connect_thread_.joinable()) connect_thread_.join();
-
-    state_.store(State::WaitingForUser);
-    display_.set_waiting();
-    WHBLogPrint("player: connection killed — waiting for reconnect");
 }
 
 // ── Spirc callbacks ───────────────────────────────────────────────────────────
@@ -637,11 +569,8 @@ void Player::handle_buttons(uint32_t trigger) {
     if ((trigger & VPAD_BUTTON_STICK_L) && OLV::is_available() && spirc_playing_) {
         if (!show_stamp_pack_picker()) return;
         const std::string &post_key = isrc_.empty() ? track_id_ : isrc_;
-        in_olv_applet_.store(true);
         OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, post_key,
                               (uint32_t)std::max(0, audio_->position_ms()), (uint32_t)track_dur_ms_);
-        in_olv_applet_.store(false);
-        background_since_s_.store(0);
     }
 }
 
@@ -844,11 +773,8 @@ void Player::handle_pro_buttons(uint32_t trigger) {
     }
     if ((trigger & WPAD_PRO_BUTTON_STICK_L) && OLV::is_available() && spirc_playing_) {
         const std::string &post_key = isrc_.empty() ? track_id_ : isrc_;
-        in_olv_applet_.store(true);
         OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, post_key,
                               (uint32_t)std::max(0, audio_->position_ms()), (uint32_t)track_dur_ms_);
-        in_olv_applet_.store(false);
-        background_since_s_.store(0);
     }
     if ((trigger & WPAD_PRO_BUTTON_X) && spirc_) {
         spirc_->toggle_shuffle();

@@ -17,8 +17,12 @@
 
 #include <nn/ac.h>
 #include <nn/act.h>
+#include <nn/acp/client.h>
+#include <nn/acp/title.h>
 #include <nsysnet/nssl.h>
 #include <coreinit/cache.h>
+#include <coreinit/mcp.h>
+#include <coreinit/title.h>
 #include <memory>
 #include <curl/curl.h>
 #include "cJSON/cJSON.h"
@@ -545,6 +549,22 @@ bool init() {
     }
     NSSLInit();
     nn::act::Initialize();
+    ACPInitialize();
+
+    // Override the ACP title identity so nn_olv uses Spotify Wii U's own title ID
+    // and access key rather than those of the H&S title WUHB runs under.
+    // ACPAssignTitlePatch tells ACP that the current main application is our title;
+    // nn_olv then reads olv_accesskey from the ACPMetaXml for k_TitleId.
+    {
+        WHBLogPrintf("olv: assigning title 0x%016llX key 0x%08X",
+                     (unsigned long long)TITLE_ID, ACCESS_KEY);
+        MCPTitleListType titlePatch = {};
+        titlePatch.titleId = TITLE_ID;
+        // Point at the title root Aroma exposes for the running WUHB.
+        strncpy(titlePatch.path, "/vol", sizeof(titlePatch.path) - 1);
+        ACPResult ar = ACPAssignTitlePatch(&titlePatch);
+        WHBLogPrintf("olv: ACPAssignTitlePatch → 0x%08X", (uint32_t)ar);
+    }
 
     // Attempt Initialize with 256 KB work buffer (minimum per reference tool).
     {
@@ -580,6 +600,7 @@ void shutdown() {
     s_available = false;
     if (s_handle) { OSDynLoad_Release(s_handle); s_handle = nullptr; }
     nn::act::Finalize();
+    ACPFinalize();
     NSSLFinish();
     nn::ac::Finalize();
 }

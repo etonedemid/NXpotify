@@ -5,7 +5,12 @@
 
 namespace OLV {
 
+// ── Permanent OLV identity — MUST NOT CHANGE after first release ──────────────
+// These three values identify this app to Roséverse. Changing them after release
+// would orphan all existing posts and break community association.
 static constexpr uint32_t COMMUNITY_ID = 157;
+static constexpr uint64_t TITLE_ID     = 0x0005000010F7C01AULL;
+static constexpr uint32_t ACCESS_KEY   = 0xB74E2D91u;
 
 // 0=normal 1=happy 2=wink 3=surprised 4=frustrated 5=sad
 static constexpr const char *FEELING_STR[] = {
