@@ -17,6 +17,7 @@
 #include <nn/ac.h>
 #include <nn/act.h>
 #include <nsysnet/nssl.h>
+#include <coreinit/cache.h>
 #include <memory>
 
 namespace OLV {
@@ -521,7 +522,7 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
     //   writes past our buffer into adjacent BSS.
     static constexpr uint32_t k_UploadParamSize = 0x2000;
     alignas(32) static uint8_t s_upload_work[0x80000];  // 512 KB work buffer
-    alignas(4)  static uint8_t s_upload_param[k_UploadParamSize];
+    alignas(32) static uint8_t s_upload_param[k_UploadParamSize];
 
     memset(s_upload_param, 0, sizeof(s_upload_param));
     s_fn_ctor_upload(s_upload_param);
@@ -563,9 +564,24 @@ void open_post_applet(const std::string &body_utf8, bool is_explicit,
 
     // Add pre-loaded stamps so users can place them on their drawings.
     // Buffers are 32-byte aligned static arrays; AddStampData gets full TGA (header + pixels).
-    if (s_fn_add_stamp) {
+    if (s_fn_add_stamp && s_stamp_count > 0) {
+        // Log stamp 0 header and footer to verify TGA is correct in the buffer.
+        const uint8_t *b0 = s_stamp_bufs[0];
+        WHBLogPrintf("olv: stamp0 hdr type=%d w=%d h=%d bpp=%d desc=0x%02X",
+            b0[2], b0[12]|(b0[13]<<8), b0[14]|(b0[15]<<8), b0[16], b0[17]);
+        const uint8_t *f0 = b0 + 40018;
+        WHBLogPrintf("olv: stamp0 ftr off=%02X%02X%02X%02X%02X%02X%02X%02X sig=%c%c%c%c%c%c%c%c",
+            f0[0],f0[1],f0[2],f0[3],f0[4],f0[5],f0[6],f0[7],
+            f0[8],f0[9],f0[10],f0[11],f0[12],f0[13],f0[14],f0[15]);
+        // Log first 8 bytes of param (vtable + flags) to verify ctor ran.
+        const uint8_t *p = s_upload_param;
+        WHBLogPrintf("olv: param[0..7]=%02X%02X%02X%02X %02X%02X%02X%02X",
+            p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
+
         int added = 0;
         for (int i = 0; i < s_stamp_count; ++i) {
+            // Flush CPU cache so nn_olv can read stamp data from physical RAM.
+            DCFlushRange(s_stamp_bufs[i], k_StampTgaSize);
             int32_t sr = s_fn_add_stamp(s_upload_param, s_stamp_bufs[i], k_StampTgaSize);
             if (sr == 0 || (uint32_t)sr == 0x01100080u) ++added;
             else WHBLogPrintf("olv: AddStampData[%d] → 0x%08X", i, (uint32_t)sr);
