@@ -38,6 +38,11 @@ jobs:
               if os.path.splitext(f)[1].lower() in exts
           )
 
+          # Wipe existing stamps so deletes in the source repo are reflected
+          for f in os.listdir('stamps'):
+              if f.startswith('stamp') and f.endswith('.png'):
+                  os.remove(os.path.join('stamps', f))
+
           for i, fname in enumerate(files, 1):
               img = Image.open(os.path.join(src, fname)).convert('L')
               img = img.resize((100, 100), Image.LANCZOS)
