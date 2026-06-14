@@ -404,7 +404,7 @@ void AudioPipeline::decode_thread_fn() {
     ov_callbacks cbs = {ov_read_cb, ov_seek_cb, ov_close_cb, ov_tell_cb};
     if (ov_open_callbacks(&ctx, &vf_, nullptr, 0, cbs) < 0) {
         WHBLogPrint("audio: ov_open_callbacks failed");
-        if (on_track_end) on_track_end();
+        if (!stop_flag_.load() && on_track_end) on_track_end();
         return;
     }
     vf_open_ = true;
