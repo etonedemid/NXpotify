@@ -301,6 +301,11 @@ void Player::on_credentials(Discovery::Credentials creds) {
         audio_->stop();
         spirc_playing_ = false;
         display_.set_waiting();
+        // If Spotify closed our AP (device switch, not our own reconnect), tell
+        // Spotify we're inactive via HTTP so the phone stops sending play commands
+        // to our dead AP and driving an activation loop.
+        if (!reconnecting_.load() && spirc_)
+            spirc_->become_inactive();
     };
 
     if (!ap_->connect(creds, std::move(acb))) {
@@ -361,8 +366,14 @@ void Player::on_credentials(Discovery::Credentials creds) {
                                   const std::string &isrc) {
         on_track_changed(t, a, u, dur, expl, id, isrc);
     };
+    scb.on_ready = [this] {
+        // Dealer connected and SPIRC_HELLO PUT succeeded — Spotify can now route
+        // commands to us.  Revert from "Connecting…" to "Waiting for Spotify…".
+        display_.set_waiting();
+    };
 
     spirc_->start(std::move(scb));
+    display_.set_connecting();   // show "Connecting…" until on_ready fires
     state_.store(State::Ready);
     const std::string &canon = ap_->canonical_username();
     zeroconf_.set_active_user(canon);

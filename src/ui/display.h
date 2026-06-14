@@ -34,7 +34,8 @@ public:
     TTF_Font     *font_small()  const { return font_sm_; }
 
     // ── state setters (thread-safe) ──────────────────────────────────────────
-    void set_waiting();   // "Waiting for Spotify…" before any session
+    void set_waiting();      // "Waiting for Spotify…" — ready for a session
+    void set_connecting();   // "Connecting…" — AP connected, dealer not ready yet
     void set_error(const std::string &msg);  // show error on the waiting screen
     void set_track(const std::string &title, const std::string &artist,
                    const std::string &album_art_url, bool is_explicit = false);
@@ -71,7 +72,7 @@ public:
 private:
     // ── rendering ────────────────────────────────────────────────────────────
     void render_to(SDL_Renderer *r, int w, int h);
-    void render_waiting(SDL_Renderer *r, int w, int h);
+    void render_waiting(SDL_Renderer *r, int w, int h, bool connecting = false);
     void render_playing(SDL_Renderer *r, int w, int h);
     void render_controls(SDL_Renderer *r, int w, int h);
     void render_olv_card(SDL_Renderer *r, int w, int h);
@@ -126,7 +127,8 @@ private:
 
     // ── display state (guarded by mu_) ───────────────────────────────────────
     std::mutex  mu_;
-    bool        waiting_    = true;
+    bool        waiting_     = true;
+    bool        connecting_  = false;  // true between AP connect and SPIRC_HELLO success
     std::string error_msg_;              // non-empty → show error on waiting screen
     std::string snap_error_;             // render-thread copy, updated each frame under mu_
     std::string title_;

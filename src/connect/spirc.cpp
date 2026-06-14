@@ -722,6 +722,19 @@ void Spirc::goodbye() {
     put_connect_state_sync(std::move(psr), 4, false);
 }
 
+void Spirc::become_inactive() {
+    if (!started_.load()) return;
+    WHBLogPrint("spirc: become_inactive — AP dropped externally");
+    inactive_.store(true);
+    saw_inactive_cluster_.store(false);
+    playing_ = false;
+    current_track_uri_.clear();
+    started_playing_at_ms_ = 0;
+    // Tell Spotify we're inactive via HTTP (works without an AP connection).
+    // reason=7 is BECAME_INACTIVE; is_active=false (field 4).
+    put_connect_state_async(7 /* BECAME_INACTIVE */, false, 0, vol_pct_);
+}
+
 void Spirc::put_connect_state_async(uint32_t reason, bool playing, int pos_ms, int vol_pct) {
     // At most one PUT inflight at a time.  If one is already running, mark dirty
     // and return — the inflight thread will fire a follow-up when it finishes.
@@ -864,6 +877,7 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
         // A Load/Play command may have raced and been dropped while helo_done_=false,
         // and playing_ is read from a detached thread so skip the racy bool guard.
         put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing_, pos_ms_, vol_pct_);
+        if (callbacks_.on_ready) callbacks_.on_ready();
     }
     return code;
 }
@@ -917,25 +931,45 @@ void Spirc::handle_dealer_message(const std::string &uri,
         WHBLogPrintf("spirc: became inactive (active='%.40s')",
                      cs.active_device_id.c_str());
 
-        // active='' with playing=1 AND started_playing_at_ms_==0 is a stale cluster
-        // echo from our own notify_track_end (put_cs playing=false) arriving before
-        // the auto-advance load command.  Treating it as became_inactive would abort
-        // the new decode thread; skip it.
-        // When started_playing_at_ms_>0 the device is mid-track and active='' means
-        // a real device switch — fall through and stop.
-        if (cs.active_device_id.empty() && cs.is_playing && started_playing_at_ms_ == 0) {
-            WHBLogPrint("spirc: cluster active='' playing=1 post-track-end echo — ignoring");
+        // active='' playing=1 is always a stale echo from our own put_cs(playing=false).
+        // Real device switches arrive as active=<other_device_id>.
+        // Ignore all active='' playing=1 to avoid the feedback loop:
+        //   became_inactive → put_cs(playing=0) → echo(active='') → became_inactive → …
+        if (cs.active_device_id.empty() && cs.is_playing) {
+            WHBLogPrint("spirc: cluster active='' playing=1 — stale echo, ignoring");
             return;
         }
 
         if (playing_ || !current_track_uri_.empty()) {
             playing_ = false;
             current_track_uri_.clear();
-            put_connect_state_async(4, false, pos_ms_, vol_pct_);
+            // Reset so any lingering echoes are caught by the active='' playing=1 guard above.
+            started_playing_at_ms_ = 0;
+            // Don't send put_cs — Spotify already knows we're inactive (it told us), and
+            // sending one would generate another cluster echo, restarting the loop.
             if (callbacks_.on_became_inactive) callbacks_.on_became_inactive();
         }
+        // Spotify has acknowledged we're inactive (different active device).
+        // The next active=ours cluster is a genuine user re-selection, not a stale echo.
+        if (inactive_.load()) saw_inactive_cluster_.store(true);
         return;
     }
+
+    // We are (or are becoming) the active device.
+    if (inactive_.load()) {
+        if (!saw_inactive_cluster_.load()) {
+            // inactive_ just set; stale echo of our pre-drop put_cs(playing=1).
+            // Spotify hasn't yet confirmed the other device is active — ignore.
+            WHBLogPrint("spirc: cluster active=ours while inactive (stale echo) — ignoring");
+            return;
+        }
+        // Spotify previously told us another device was active, now routes back to us:
+        // the user explicitly re-selected this device. Clear inactive and proceed.
+        WHBLogPrint("spirc: cluster active=ours — re-activating after inactive");
+        inactive_.store(false);
+        saw_inactive_cluster_.store(false);
+    }
+
     if (cs.track_uri.empty()) return;
 
     // Same track, paused mid-song (started_playing_at_ms_ > 0), cluster says play:
@@ -1063,6 +1097,15 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
     cJSON *root = cJSON_Parse(cmd_json.c_str());
     if (!root) {
         WHBLogPrint("spirc: cmd: JSON parse failed");
+        return false;
+    }
+
+    // AP dropped externally (device switch) — reject dealer commands until a new
+    // AP/Spirc session is established so we don't send put_cs(playing=1) over HTTP
+    // and kick off another activation loop.
+    if (inactive_.load()) {
+        WHBLogPrint("spirc: rejecting cmd (inactive after AP drop)");
+        cJSON_Delete(root);
         return false;
     }
 
@@ -1655,7 +1698,12 @@ void Spirc::handle_mercury_event(const std::vector<uint8_t> &payload) {
         return;
     }
 
-    // All other Mercury events: old Spirc frame format.
+    // All other Mercury events: old Spirc frame format — but only on the Spirc
+    // notification topic.  Ignore unsolicited AP pushes (herodotus, recently-played,
+    // etc.) whose payloads are not Spirc frames and would be misinterpreted.
+    static constexpr char kSpircPfx[] = "hm://remote/3/user/";
+    if (uri.compare(0, sizeof(kSpircPfx) - 1, kSpircPfx) != 0) return;
+    WHBLogPrintf("spirc: frame uri='%.60s'", uri.c_str());
     handle_frame(parts[1]);
 }
 
@@ -1730,9 +1778,23 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
     WHBLogPrintf("spirc: frame type=%u from='%s'", msg_type, ident.c_str());
 
     switch (msg_type) {
+    case 0:             // kHello in proto3: typ field absent → default 0
     case MsgType::Hello:
+        // Another device is announcing itself. If we're active, yield to it —
+        // this is the Spirc v1 device-switch signal (modern Spotify sends typ=0
+        // because proto3 omits default enum values on the wire).
+        if (playing_) {
+            WHBLogPrint("spirc: kHello while playing — yielding to other device");
+            playing_ = false;
+            current_track_uri_.clear();
+            started_playing_at_ms_ = 0;
+            if (callbacks_.on_became_inactive) callbacks_.on_became_inactive();
+        }
+        // Reply with our current state (post-yield) so the other device knows.
+        if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
+        break;
     case MsgType::Notify:
-        // Another device announced its state — reply with ours
+        // Another device pushed its state — reply with ours for synchronisation.
         if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
         break;
 

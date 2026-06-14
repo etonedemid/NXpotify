@@ -65,6 +65,10 @@ public:
         // Fired when a cluster update confirms another device became active while
         // we were playing — user transferred playback away from us.
         std::function<void()> on_became_inactive;
+
+        // Fired once the SPIRC_HELLO PUT succeeds and Spotify can route commands
+        // to this device.  Use to show a "ready" indicator in the UI.
+        std::function<void()> on_ready;
     };
 
     // ap must outlive Spirc.
@@ -104,6 +108,10 @@ public:
     // Synchronous goodbye PUT before app exit — marks this device inactive so
     // Spotify removes it from the active session immediately.
     void goodbye();
+
+    // Called when the AP connection drops unexpectedly (not our own reconnect).
+    // Notifies Spotify we're inactive via HTTP so the phone stops re-activating us.
+    void become_inactive();
 
     // Re-play the current track from the beginning without advancing the index.
     // Used by Player when repeat is on and a track finishes.
@@ -222,6 +230,10 @@ private:
     std::atomic<int>  push_inflight_{0};       // 0=idle, 1=PUT inflight (at most one at a time)
     std::atomic<bool> dirty_push_{false};      // state changed while a PUT was inflight
     std::atomic<bool> local_pause_pending_{false}; // player pressed pause; suppress stale cluster resume echo
+    std::atomic<bool> inactive_{false};            // set by become_inactive(); gates play commands
+    // Cleared by become_inactive(); set when we see active!=ours (Spotify ack'd our
+    // BECAME_INACTIVE). The next active=ours after this flag is a genuine re-activation.
+    std::atomic<bool> saw_inactive_cluster_{false};
 
     // Dealer WebSocket — provides the connection_id for connect-state
     Dealer            dealer_;
