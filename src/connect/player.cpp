@@ -246,6 +246,9 @@ void Player::run() {
         OSSleepTicks(OSMillisecondsToTicks(16));
     }
 
+    // Tell Spotify this device is going away before closing the connection.
+    if (spirc_) spirc_->goodbye();
+
     // Disconnect AP first — shutdown(fd_) unblocks any recv_exact in the
     // connect thread, causing it to exit quickly.
     if (ap_) ap_->disconnect();

@@ -701,6 +701,27 @@ static int64_t now_ms_wiiu() {
     return (int64_t)(OSGetSystemTick() / OSMillisecondsToTicks(1));
 }
 
+void Spirc::goodbye() {
+    if (!started_.load()) return;
+    playing_              = false;
+    started_playing_at_ms_ = 0;
+    current_track_uri_.clear();
+
+    int64_t proto_ms = (int64_t)time(nullptr) * 1000;
+    std::vector<uint8_t> device;
+    pb_msg(device, 1, build_device_info_cs(vol_pct_));
+    pb_msg(device, 2, build_player_state(false, pos_ms_, proto_ms));
+
+    std::vector<uint8_t> psr;
+    pb_msg (psr, 2, device);
+    pb_u32 (psr, 3, 2);
+    pb_bool(psr, 4, false);
+    pb_u32 (psr, 5, 4 /* PLAYER_STATE_CHANGED */);
+    pb_i64 (psr, 12, proto_ms);
+
+    put_connect_state_sync(std::move(psr), 4, false);
+}
+
 void Spirc::put_connect_state_async(uint32_t reason, bool playing, int pos_ms, int vol_pct) {
     // At most one PUT inflight at a time.  If one is already running, mark dirty
     // and return — the inflight thread will fire a follow-up when it finishes.

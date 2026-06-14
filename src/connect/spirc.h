@@ -101,6 +101,10 @@ public:
     // Use instead of notify(false,...) when the audio pipeline drains naturally.
     void notify_track_end(int vol_pct);
 
+    // Synchronous goodbye PUT before app exit — marks this device inactive so
+    // Spotify removes it from the active session immediately.
+    void goodbye();
+
     // Re-play the current track from the beginning without advancing the index.
     // Used by Player when repeat is on and a track finishes.
     void replay_current();
