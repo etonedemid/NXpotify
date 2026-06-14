@@ -153,6 +153,12 @@ void Display::set_connecting() {
     pos_ms_ = dur_ms_ = 0; playing_ = false;
 }
 
+void Display::set_ready() {
+    std::lock_guard<std::mutex> lk(mu_);
+    connecting_ = false;
+    // Don't touch waiting_/title_/etc — music may already be playing.
+}
+
 void Display::set_error(const std::string &msg) {
     std::lock_guard<std::mutex> lk(mu_);
     waiting_ = true;

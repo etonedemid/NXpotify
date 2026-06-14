@@ -36,6 +36,7 @@ public:
     // ── state setters (thread-safe) ──────────────────────────────────────────
     void set_waiting();      // "Waiting for Spotify…" — ready for a session
     void set_connecting();   // "Connecting…" — AP connected, dealer not ready yet
+    void set_ready();        // clears "Connecting…" flag without touching playing state
     void set_error(const std::string &msg);  // show error on the waiting screen
     void set_track(const std::string &title, const std::string &artist,
                    const std::string &album_art_url, bool is_explicit = false);

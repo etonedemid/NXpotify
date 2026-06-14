@@ -368,8 +368,9 @@ void Player::on_credentials(Discovery::Credentials creds) {
     };
     scb.on_ready = [this] {
         // Dealer connected and SPIRC_HELLO PUT succeeded — Spotify can now route
-        // commands to us.  Revert from "Connecting…" to "Waiting for Spotify…".
-        display_.set_waiting();
+        // commands to us.  Only clear the "Connecting…" flag; don't reset the
+        // display state in case music already started while the PUT was in-flight.
+        display_.set_ready();
     };
 
     spirc_->start(std::move(scb));
