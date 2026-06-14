@@ -255,19 +255,30 @@ static ClusterState parse_cluster_update(const std::vector<uint8_t> &data) {
                                 } else ci.skip(w);
                             }
                         } else if (f == 7 && w == 2) { // track (ProvidedTrack)
+                            // ProvidedTrack { context_track=1 (ContextTrack { uri=1, uid=2 }), ... }
                             PRd tr; ps.enter(tr);
                             while (tr.next(f, w)) {
-                                if      (f == 1 && w == 2) tr.read_str(cs.track_uri);
-                                else if (f == 2 && w == 2) tr.read_str(cs.track_uid);
-                                else                        tr.skip(w);
+                                if (f == 1 && w == 2) {    // context_track
+                                    PRd ct; tr.enter(ct);
+                                    while (ct.next(f, w)) {
+                                        if      (f == 1 && w == 2) ct.read_str(cs.track_uri);
+                                        else if (f == 2 && w == 2) ct.read_str(cs.track_uid);
+                                        else                        ct.skip(w);
+                                    }
+                                } else tr.skip(w);
                             }
                         } else if (f == 8 && w == 2) { // prev_tracks (repeated ProvidedTrack)
                             PRd tr; ps.enter(tr);
                             std::string uri, uid;
                             while (tr.next(f, w)) {
-                                if      (f == 1 && w == 2) tr.read_str(uri);
-                                else if (f == 2 && w == 2) tr.read_str(uid);
-                                else                        tr.skip(w);
+                                if (f == 1 && w == 2) {    // context_track
+                                    PRd ct; tr.enter(ct);
+                                    while (ct.next(f, w)) {
+                                        if      (f == 1 && w == 2) ct.read_str(uri);
+                                        else if (f == 2 && w == 2) ct.read_str(uid);
+                                        else                        ct.skip(w);
+                                    }
+                                } else tr.skip(w);
                             }
                             if (!uri.empty()) {
                                 cs.prev_uris.push_back(uri);
@@ -277,9 +288,14 @@ static ClusterState parse_cluster_update(const std::vector<uint8_t> &data) {
                             PRd tr; ps.enter(tr);
                             std::string uri, uid;
                             while (tr.next(f, w)) {
-                                if      (f == 1 && w == 2) tr.read_str(uri);
-                                else if (f == 2 && w == 2) tr.read_str(uid);
-                                else                        tr.skip(w);
+                                if (f == 1 && w == 2) {    // context_track
+                                    PRd ct; tr.enter(ct);
+                                    while (ct.next(f, w)) {
+                                        if      (f == 1 && w == 2) ct.read_str(uri);
+                                        else if (f == 2 && w == 2) ct.read_str(uid);
+                                        else                        ct.skip(w);
+                                    }
+                                } else tr.skip(w);
                             }
                             if (!uri.empty()) {
                                 cs.next_uris.push_back(uri);
@@ -1100,15 +1116,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         return false;
     }
 
-    // AP dropped externally (device switch) — reject dealer commands until a new
-    // AP/Spirc session is established so we don't send put_cs(playing=1) over HTTP
-    // and kick off another activation loop.
-    if (inactive_.load()) {
-        WHBLogPrint("spirc: rejecting cmd (inactive after AP drop)");
-        cJSON_Delete(root);
-        return false;
-    }
-
     // The Request JSON nests the command under a "command" key:
     //   {"message_id":1,"sent_by_device_id":"...","command":{"endpoint":"play",...}}
     // Fall back to root if the command object is missing (direct endpoint format).
@@ -1122,6 +1129,20 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
     }
     const char *ep = ep_j->valuestring;
     WHBLogPrintf("spirc: cmd endpoint='%s'", ep);
+
+    // AP dropped externally (device switch) — reject most commands to avoid driving
+    // put_cs(playing=1) over HTTP and kicking off another activation loop.
+    // Exception: "transfer" is an explicit user selection and always clears inactive_.
+    if (inactive_.load()) {
+        if (strcmp(ep, "transfer") != 0) {
+            WHBLogPrint("spirc: rejecting cmd (inactive after AP drop)");
+            cJSON_Delete(root);
+            return false;
+        }
+        WHBLogPrint("spirc: transfer while inactive — re-activating");
+        inactive_.store(false);
+        saw_inactive_cluster_.store(false);
+    }
 
     // ── pause / resume ────────────────────────────────────────────────────────
     if (strcmp(ep, "pause") == 0) {
