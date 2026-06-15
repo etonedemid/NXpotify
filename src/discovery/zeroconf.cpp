@@ -24,26 +24,17 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 
-#include <whb/log.h>
-#include <whb/sdcard.h>
-#include <coreinit/time.h>
-#include <coreinit/thread.h>
+
+#include "platform.h"
+
+
 
 namespace Discovery {
-
-static bool s_sd_mounted = false;
-
-static void ensure_sd_mounted() {
-    if (!s_sd_mounted) {
-        s_sd_mounted = WHBMountSdCard();
-        WHBLogPrintf("zc: SD card %s", s_sd_mounted ? "mounted" : "FAILED to mount");
-    }
-}
 
 
 // ── DH parameters (RFC 2409 / MODP Group 2, 1024-bit) ────────────────────────
 // Generator g = 2; prime p is standard.
-// RFC 2409 Oakley Group 2 — 1024-bit MODP prime, generator 2.
+// RFC 2409 Oakley Group 2 -- 1024-bit MODP prime, generator 2.
 // Spotify Connect uses this exact group for the Zeroconf DH key exchange.
 static const uint8_t DH_PRIME[128] = {
     // FFFFFFFF FFFFFFFF C90FDAA2 21468C23 4C4C6628 B80DC1CD
@@ -201,7 +192,7 @@ Zeroconf::Zeroconf(const std::string &device_name,
                    const std::string &device_id)
     : device_name_(device_name), device_id_(device_id)
 {
-    // DH key pair — heap-allocate RNG state (stack entropy can hang on Wii U)
+    // DH key pair -- heap-allocate RNG state
     auto *entropy  = new mbedtls_entropy_context;
     auto *ctr_drbg = new mbedtls_ctr_drbg_context;
     mbedtls_entropy_init(entropy);
@@ -236,21 +227,25 @@ void Zeroconf::start(std::function<void(Credentials)> on_creds,
     on_creds_ = std::move(on_creds);
     on_error_ = std::move(on_error);
     stop_.store(false);
-    mdns_thread_ = std::thread(&Zeroconf::mdns_thread_fn, this);
-    http_thread_ = std::thread(&Zeroconf::http_thread_fn, this);
+    { pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1024*1024);
+      pthread_create(&mdns_thread_, &a, [](void *v) -> void* { static_cast<Zeroconf*>(v)->mdns_thread_fn(); return nullptr; }, this);
+      pthread_attr_destroy(&a); }
+    { pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1024*1024);
+      pthread_create(&http_thread_, &a, [](void *v) -> void* { static_cast<Zeroconf*>(v)->http_thread_fn(); return nullptr; }, this);
+      pthread_attr_destroy(&a); }
 }
 
 void Zeroconf::stop() {
     stop_.store(true);
-    if (mdns_thread_.joinable()) mdns_thread_.join();
-    if (http_thread_.joinable()) http_thread_.join();
+    if (mdns_thread_) { pthread_join(mdns_thread_, nullptr); mdns_thread_ = 0; }
+    if (http_thread_) { pthread_join(http_thread_, nullptr); http_thread_ = 0; }
 }
 
 // ── mDNS announcer ────────────────────────────────────────────────────────────
 
 void Zeroconf::mdns_thread_fn() {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) { WHBLogPrint("zc: mdns socket failed"); return; }
+    if (sock < 0) { PLAT_LOG("zc: mdns socket failed"); return; }
 
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -260,7 +255,7 @@ void Zeroconf::mdns_thread_fn() {
     bind_addr.sin_port        = htons(5353);
     bind_addr.sin_addr.s_addr = INADDR_ANY;
     int bret = bind(sock, reinterpret_cast<struct sockaddr *>(&bind_addr), sizeof(bind_addr));
-    WHBLogPrintf("zc: mdns bind=%d errno=%d", bret, errno);
+    PLAT_LOGF("zc: mdns bind=%d errno=%d", bret, errno);
 
     uint8_t ttl = 255;
     setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
@@ -269,14 +264,14 @@ void Zeroconf::mdns_thread_fn() {
     char ip_str[32];
     struct in_addr ia; ia.s_addr = local_ip;
     inet_ntop(AF_INET, &ia, ip_str, sizeof(ip_str));
-    WHBLogPrintf("zc: mdns local_ip=%s", ip_str);
+    PLAT_LOGF("zc: mdns local_ip=%s", ip_str);
 
     // Join the mDNS multicast group so IGMP snooping routers forward the packets
     struct ip_mreq mreq{};
     mreq.imr_multiaddr.s_addr = inet_addr("224.0.0.251");
     mreq.imr_interface.s_addr = local_ip;
     int jret = setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
-    WHBLogPrintf("zc: mdns join=%d errno=%d", jret, errno);
+    PLAT_LOGF("zc: mdns join=%d errno=%d", jret, errno);
 
     // Pin outgoing multicast to the correct interface
     struct in_addr iface{}; iface.s_addr = local_ip;
@@ -306,7 +301,7 @@ void Zeroconf::mdns_thread_fn() {
                     std::string qname;
                     while (pos < (size_t)n && buf[pos] != 0) {
                         uint8_t llen = buf[pos++];
-                        if (llen >= 0xC0) { pos++; break; } // pointer — skip
+                        if (llen >= 0xC0) { pos++; break; } // pointer -- skip
                         for (uint8_t i = 0; i < llen && pos < (size_t)n; i++)
                             qname += (char)buf[pos++];
                         qname += '.';
@@ -319,7 +314,7 @@ void Zeroconf::mdns_thread_fn() {
                     bool match = qtype == 12 &&
                                  (qname.find("_spotify-connect") != std::string::npos);
                     if (match) {
-                        WHBLogPrint("zc: mdns PTR query — replying");
+                        PLAT_LOG("zc: mdns PTR query -- replying");
                         mdns_announce(sock, local_ip);
                         break;
                     }
@@ -328,11 +323,11 @@ void Zeroconf::mdns_thread_fn() {
         }
 
         if (countdown == 0) {
-            WHBLogPrint("zc: mdns announcing...");
+            PLAT_LOG("zc: mdns announcing...");
             mdns_announce(sock, local_ip);
             countdown = 30;
         }
-        OSSleepTicks(OSMillisecondsToTicks(1000));
+        plat_sleep_ms(1000);
         --countdown;
     }
     close(sock);
@@ -396,14 +391,14 @@ void Zeroconf::mdns_announce(int sock, uint32_t local_ip) {
     mcast.sin_addr.s_addr = inet_addr("224.0.0.251");
     ssize_t sent = sendto(sock, pkt.data(), pkt.size(), 0,
                           reinterpret_cast<struct sockaddr *>(&mcast), sizeof(mcast));
-    WHBLogPrintf("zc: mdns sendto=%zd pkt=%zu errno=%d", sent, pkt.size(), errno);
+    PLAT_LOGF("zc: mdns sendto=%zd pkt=%zu errno=%d", sent, pkt.size(), errno);
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 
 void Zeroconf::http_thread_fn() {
     int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) { WHBLogPrint("zc: http socket failed"); return; }
+    if (srv < 0) { PLAT_LOG("zc: http socket failed"); return; }
 
     int yes = 1;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -414,19 +409,17 @@ void Zeroconf::http_thread_fn() {
     addr.sin_port        = htons(http_port_);
     addr.sin_addr.s_addr = INADDR_ANY;
     if (bind(srv, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-        WHBLogPrint("zc: http bind failed"); close(srv); return;
+        PLAT_LOG("zc: http bind failed"); close(srv); return;
     }
     listen(srv, 4);
-    WHBLogPrintf("zc: HTTP listening on port %d", http_port_);
+    PLAT_LOGF("zc: HTTP listening on port %d", http_port_);
 
     while (!stop_.load()) {
         struct pollfd pfd = { srv, POLLIN, 0 };
         if (poll(&pfd, 1, 200) <= 0) continue;
         int fd = accept(srv, nullptr, nullptr);
         if (fd >= 0) {
-            // Wii U: use SO_BIO to ensure blocking mode on the accepted socket.
-            int bio = 1;
-            setsockopt(fd, SOL_SOCKET, SO_BIO, &bio, sizeof(bio));
+            
             handle_client(fd);
             close(fd);
         }
@@ -466,10 +459,10 @@ void Zeroconf::handle_client(int fd) {
         action = params["action"];
     }
 
-    WHBLogPrintf("zc: %s %s action=%s body_len=%zu",
+    PLAT_LOGF("zc: %s %s action=%s body_len=%zu",
                  method.c_str(), path.c_str(), action.c_str(), body_raw.size());
     if (!body_raw.empty())
-        WHBLogPrintf("zc: body[0..200]: %.200s", body_raw.c_str());
+        PLAT_LOGF("zc: body[0..200]: %.200s", body_raw.c_str());
 
     if (action == "getInfo") {
         http_respond(fd, 200, "application/json", build_info_json());
@@ -482,7 +475,7 @@ void Zeroconf::handle_client(int fd) {
 
         // Log every param so we can see exactly what the Spotify app sends.
         for (auto &[k, v] : params)
-            WHBLogPrintf("zc: addUser param '%s'='%.80s'(len=%zu)", k.c_str(), v.c_str(), v.size());
+            PLAT_LOGF("zc: addUser param '%s'='%.80s'(len=%zu)", k.c_str(), v.c_str(), v.size());
 
         const std::string &username      = params["userName"];
         const std::string &blob_b64      = params["blob"];
@@ -493,25 +486,25 @@ void Zeroconf::handle_client(int fd) {
         const std::string &token_field   = params["token"];
 
         Credentials creds;
-        creds.device_id = device_id_;  // always include our Wii U device ID
+        creds.device_id = device_id_;
         bool ok = false;
 
         if (!username.empty() && !blob_b64.empty() && !client_key.empty()) {
             // Old protocol: DH-encrypted blob
             ok = decrypt_blob(username, b64_decode(client_key),
                               b64_decode(blob_b64), creds);
-            if (!ok) WHBLogPrint("zc: blob decrypt failed");
+            if (!ok) PLAT_LOG("zc: blob decrypt failed");
         } else if (!username.empty() && (!access_token.empty() || !token_field.empty())) {
             // Prefer a dedicated token field over loginId (loginId is a UUID, not an OAuth token).
             const std::string &tok = access_token.empty() ? token_field : access_token;
-            WHBLogPrintf("zc: token auth via accessToken/token len=%zu first20='%.20s'",
+            PLAT_LOGF("zc: token auth via accessToken/token len=%zu first20='%.20s'",
                          tok.size(), tok.c_str());
             creds.username  = username;
             creds.auth_type = 0x03;  // AUTHENTICATION_SPOTIFY_TOKEN
             creds.auth_data.assign(tok.begin(), tok.end());
             ok = true;
         } else if (!username.empty() && !login_id.empty()) {
-            WHBLogPrintf("zc: loginId flow user='%s' loginId='%.32s'",
+            PLAT_LOGF("zc: loginId flow user='%s' loginId='%.32s'",
                          username.c_str(), login_id.c_str());
 
             // Respond immediately so the Spotify app doesn't time out.
@@ -519,13 +512,11 @@ void Zeroconf::handle_client(int fd) {
                          "{\"status\":101,\"statusString\":\"OK\","
                          "\"spotifyError\":0}");
 
-            ensure_sd_mounted();
-
             creds.username = username;
 
             // Priority 1: saved reusable credentials from a previous APWelcome.
             {
-                FILE *f = fopen("/vol/external01/spotify_saved_creds.bin", "rb");
+                FILE *f = fopen("sdmc:/spotify_saved_creds.bin", "rb");
                 if (f) {
                     uint8_t type_byte = 0;
                     fread(&type_byte, 1, 1, f);
@@ -538,24 +529,25 @@ void Zeroconf::handle_client(int fd) {
                     if (!blob.empty()) {
                         creds.auth_type = type_byte;
                         creds.auth_data = std::move(blob);
-                        WHBLogPrintf("zc: using saved creds auth_type=%u len=%zu",
+                        PLAT_LOGF("zc: using saved creds auth_type=%u len=%zu",
                                      (unsigned)creds.auth_type, creds.auth_data.size());
                         if (on_creds_) {
-                            auto cb = on_creds_;
-                            std::thread([cb, c = std::move(creds)]() mutable {
-                                cb(std::move(c));
-                            }).detach();
+                            struct ZcArg { std::function<void(Credentials)> cb; Credentials c; };
+                            auto *zarg = new ZcArg{on_creds_, std::move(creds)};
+                            pthread_t pth; pthread_attr_t za; pthread_attr_init(&za); pthread_attr_setstacksize(&za, 1024*1024);
+                            pthread_create(&pth, &za, [](void *vp) -> void* { auto *a = static_cast<ZcArg*>(vp); a->cb(std::move(a->c)); delete a; return nullptr; }, zarg);
+                            pthread_attr_destroy(&za); pthread_detach(pth);
                         }
                         return;
                     }
                 }
             }
 
-            WHBLogPrint("zc: spotify_saved_creds.bin not found on SD card");
+            PLAT_LOG("zc: spotify_saved_creds.bin not found on SD card");
             if (on_error_) on_error_("Credentials not found on SD card");
             return;  // already responded above
         } else {
-            WHBLogPrintf("zc: addUser missing credentials user='%s' blob_len=%zu loginId_len=%zu",
+            PLAT_LOGF("zc: addUser missing credentials user='%s' blob_len=%zu loginId_len=%zu",
                          username.c_str(), blob_b64.size(), login_id.size());
         }
 
@@ -566,10 +558,11 @@ void Zeroconf::handle_client(int fd) {
             // Dispatch on_creds_ asynchronously so the HTTP thread stays
             // responsive to getInfo polls while the AP handshake runs.
             if (on_creds_) {
-                auto cb = on_creds_;
-                std::thread([cb, c = std::move(creds)]() mutable {
-                    cb(std::move(c));
-                }).detach();
+                struct ZcArg { std::function<void(Credentials)> cb; Credentials c; };
+                auto *zarg = new ZcArg{on_creds_, std::move(creds)};
+                pthread_t pth; pthread_attr_t za; pthread_attr_init(&za); pthread_attr_setstacksize(&za, 1024*1024);
+                pthread_create(&pth, &za, [](void *vp) -> void* { auto *a = static_cast<ZcArg*>(vp); a->cb(std::move(a->c)); delete a; return nullptr; }, zarg);
+                pthread_attr_destroy(&za); pthread_detach(pth);
             }
         } else {
             http_respond(fd, 200, "application/json",
@@ -585,23 +578,29 @@ void Zeroconf::handle_client(int fd) {
 // ── getInfo JSON ──────────────────────────────────────────────────────────────
 
 std::string Zeroconf::build_info_json() const {
-    char buf[1024];
+    char buf[2048];
     snprintf(buf, sizeof(buf),
         "{"
         "\"status\":101,"
         "\"statusString\":\"OK\","
         "\"spotifyError\":0,"
-        "\"version\":\"2.1.0\","
-        "\"libraryVersion\":\"1.1.0\","
+        "\"version\":\"2.7.1\","
+        "\"libraryVersion\":\"1.0.0\","
         "\"accountReq\":\"PREMIUM\","
         "\"brandDisplayName\":\"Nintendo\","
-        "\"modelDisplayName\":\"Wii U\","
+        "\"modelDisplayName\":\"Switch\","
         "\"deviceType\":\"GAME_CONSOLE\","
         "\"remoteName\":\"%s\","
         "\"activeUser\":\"%s\","
         "\"deviceID\":\"%s\","
         "\"publicKey\":\"%s\","
-        "\"scope\":\"streaming\""
+        "\"scope\":\"streaming\","
+        "\"tokenType\":\"default\","
+        "\"clientID\":\"65b708073fc0480ea92a077233ca87bd\","
+        "\"productID\":0,"
+        "\"groupStatus\":\"NONE\","
+        "\"resolverVersion\":\"0\","
+        "\"availability\":\"\""
         "}",
         device_name_.c_str(),
         active_user_.c_str(),
@@ -666,7 +665,7 @@ bool Zeroconf::decrypt_blob(const std::string &username,
                     mac_key, 20,
                     blob.data(), data_len, mac_computed);
     if (memcmp(mac_computed, blob.data() + data_len, 20) != 0) {
-        WHBLogPrint("zc: blob MAC mismatch");
+        PLAT_LOG("zc: blob MAC mismatch");
         return false;
     }
 
@@ -702,9 +701,9 @@ bool Zeroconf::decrypt_blob(const std::string &username,
     // username in blob must match the POST param
     std::string blob_user(reinterpret_cast<char *>(plain.data() + pos), ulen);
     if (blob_user != username) {
-        WHBLogPrintf("zc: username mismatch blob='%s' param='%s'",
+        PLAT_LOGF("zc: username mismatch blob='%s' param='%s'",
                      blob_user.c_str(), username.c_str());
-        // Non-fatal — use POST-provided username
+        // Non-fatal -- use POST-provided username
     }
     pos += ulen;
 
@@ -716,7 +715,7 @@ bool Zeroconf::decrypt_blob(const std::string &username,
     out.auth_data.assign(plain.data() + pos, plain.data() + pos + alen);
     out.username = username;
 
-    WHBLogPrintf("zc: credentials for '%s' auth_type=%d auth_data_len=%d",
+    PLAT_LOGF("zc: credentials for '%s' auth_type=%d auth_data_len=%d",
                  out.username.c_str(), out.auth_type, alen);
     return true;
 }

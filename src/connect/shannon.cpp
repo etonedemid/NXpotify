@@ -8,7 +8,7 @@ static inline uint32_t le32(const uint8_t *b) {
            ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
 }
 
-// ── Non-linear substitution functions (no table — pure rotation + XOR) ────────
+// ── Non-linear substitution functions (no table -- pure rotation + XOR) ────────
 
 uint32_t Shannon::sbox1(uint32_t w) {
     w ^= rotl(w, 5) | rotl(w, 7);

@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
-#include <thread>
+#include <pthread.h>
 #include <atomic>
 #include <mutex>
 #include <memory>
@@ -51,7 +51,7 @@ namespace Cmd {
 //   1. Resolves the AP address via https://apresolve.spotify.com/
 //   2. TCP connect → Shannon-secured handshake (DH key exchange)
 //   3. Login with stored Zeroconf credentials
-//   4. Background receive loop — dispatches packets to on_packet
+//   4. Background receive loop -- dispatches packets to on_packet
 //
 // Thread safety:
 //   send_packet() is safe to call from any thread (guarded by send_mu_).
@@ -61,7 +61,7 @@ class AP {
 public:
     struct Callbacks {
         // Called for every packet the AP sends us (after login).
-        // Invoked from the receive thread — do not call send_packet() from here
+        // Invoked from the receive thread -- do not call send_packet() from here
         // without a separate dispatch (deadlock risk if send_mu_ is involved in
         // the callback chain).  Ping is handled internally and not forwarded.
         std::function<void(uint8_t cmd, std::vector<uint8_t> payload)> on_packet;
@@ -77,7 +77,7 @@ public:
     // failure.  Returns false on any error.
     bool connect(const Discovery::Credentials &creds, Callbacks cb);
 
-    // Graceful teardown — signals recv thread to stop and joins.
+    // Graceful teardown -- signals recv thread to stop and joins.
     void disconnect();
 
     // Send an encrypted AP packet.  Thread-safe.  Returns false on send failure.
@@ -115,7 +115,7 @@ private:
     // curl CONNECT_ONLY is used to establish the TCP connection (the Wii U's
     // raw connect() is unreliable for outbound TCP).  After do_handshake()
     // completes, raw_recv_ is set true and recv_exact switches to blocking
-    // POSIX recv() — curl's internal state appears to swallow incoming data
+    // POSIX recv() -- curl's internal state appears to swallow incoming data
     // after the handshake phase, preventing POLLIN from ever firing.
     CURL *curl_       = nullptr;
     bool  raw_recv_   = false;  // true after handshake: bypass curl for recv
@@ -127,7 +127,7 @@ private:
     uint32_t recv_seq_ = 0;
 
     std::mutex   send_mu_;
-    std::thread  recv_thread_;
+    pthread_t    recv_thread_ = 0;
     std::atomic<bool> stop_     {false};
     std::atomic<bool> connected_{false};
 

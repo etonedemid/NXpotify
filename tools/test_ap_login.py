@@ -319,7 +319,7 @@ def run(ap_host, ap_port, auth_type, auth_data, username, device_id):
     # ── DH shared secret ──────────────────────────────────────────────────────
     server_int = int.from_bytes(server_pub, 'big')
     shared_int = pow(server_int, x, DH_P)
-    # Strip leading zeros — librespot does not pad the shared secret
+    # Strip leading zeros -- librespot does not pad the shared secret
     shared_bytes = shared_int.to_bytes(DH_KEY_SIZE, 'big').lstrip(b'\x00')
 
     # ── Key derivation ────────────────────────────────────────────────────────
@@ -375,7 +375,7 @@ def run(ap_host, ap_port, auth_type, auth_data, username, device_id):
     try:
         resp_hdr = sock.recv(3)
     except socket.timeout:
-        print("  TIMEOUT — no response in 30s")
+        print("  TIMEOUT -- no response in 30s")
         return
     if not resp_hdr:
         print("  Server closed connection without sending any data (FIN with no payload)")

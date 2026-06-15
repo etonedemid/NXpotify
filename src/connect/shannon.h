@@ -2,14 +2,14 @@
 #include <cstdint>
 #include <cstddef>
 
-// Shannon stream cipher — Spotify AP packet encryption + MAC.
+// Shannon stream cipher -- Spotify AP packet encryption + MAC.
 // Ported from https://github.com/plietar/rust-shannon (used by librespot).
 //
 // Usage per packet:
-//   nonce(seq_number)         — reset + reseed with big-endian packet counter
-//   encrypt(buf, len)         — XOR plaintext → ciphertext, accumulate MAC
-//     OR decrypt(buf, len)   — XOR ciphertext → plaintext, accumulate MAC
-//   finish(mac)               — produce 4-byte MAC
+//   nonce(seq_number)         -- reset + reseed with big-endian packet counter
+//   encrypt(buf, len)         -- XOR plaintext → ciphertext, accumulate MAC
+//     OR decrypt(buf, len)   -- XOR ciphertext → plaintext, accumulate MAC
+//   finish(mac)               -- produce 4-byte MAC
 
 namespace Connect {
 

@@ -6,13 +6,14 @@
 #include <mbedtls/ecdh.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+#include <sys/select.h>
 #include <curl/curl.h>
 
 // Minimal TLS 1.3 client using mbedTLS 2.28 crypto primitives.
 // Implements just enough to connect to Spotify's AP:
 //   X25519 + secp256r1 key exchange, TLS_AES_128_GCM_SHA256,
 //   no certificate verification.
-// send() encrypts and writes directly — no pre-write recv check
+// send() encrypts and writes directly -- no pre-write recv check
 // (which is what deadlocks NSSL when the server sends no NewSessionTicket).
 
 class TLS13Client {

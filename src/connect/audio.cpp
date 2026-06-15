@@ -12,22 +12,20 @@
 
 #include <curl/curl.h>
 #include <mbedtls/aes.h>
-#include <whb/log.h>
-#include <coreinit/time.h>
-#include <coreinit/thread.h>
+#include "platform.h"
 
 namespace Connect {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 static constexpr size_t CHUNK_SIZE   = 0x20000;   // 128 KB per fetch
-static constexpr size_t PCM_RING_CAP = 1u << 16;  // 65536 samples — power-of-2 required
+static constexpr size_t PCM_RING_CAP = 1u << 16;  // 65536 samples -- power-of-2 required
 static constexpr int    SAMPLE_RATE  = 44100;
 static constexpr int    CHANNELS     = 2;
 
 // Spotify audio AES-128-CTR IV (from librespot decrypt.rs AUDIO_AESIV constant).
 // The counter starts here and increments by 1 for every 16-byte AES block,
-// matching Ctr128BE — big-endian 128-bit counter.
+// matching Ctr128BE -- big-endian 128-bit counter.
 static const uint8_t AUDIO_AESIV[16] = {
     0x72, 0xe0, 0x67, 0xfb, 0xdd, 0xcb, 0xcf, 0x77,
     0xeb, 0xe8, 0xbc, 0x64, 0x3f, 0x63, 0x0d, 0x93,
@@ -56,7 +54,7 @@ static void aes_ctr_decrypt(const std::vector<uint8_t> &key,
         block_count >>= 8;
     }
 
-    // nc_off = position within the starting 16-byte AES block (0–15)
+    // nc_off = position within the starting 16-byte AES block (0-15)
     size_t  nc_off       = file_offset % 16;
     uint8_t stream_block[16] = {};
 
@@ -127,15 +125,15 @@ static bool fetch_range(const std::string &url, size_t start, size_t end_inc,
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_easy_cleanup(curl);
     if (rc != CURLE_OK || out.empty()) {
-        WHBLogPrintf("audio: fetch_range curl=%d http=%ld sz=%zu url=%.50s",
-                     (int)rc, http_code, out.size(), url.c_str());
+        printf("audio: fetch_range curl=%d http=%ld sz=%zu url=%.50s\n",
+               (int)rc, http_code, out.size(), url.c_str());
     }
     return rc == CURLE_OK && !out.empty();
 }
 
 // ── Chunk cache ───────────────────────────────────────────────────────────────
 
-static const char *CACHE_BASE = "/vol/external01/spotify_cache";
+static const char *CACHE_BASE = "sdmc:/spotify_cache";
 
 static std::string to_hex(const uint8_t *data, size_t len) {
     static const char h[] = "0123456789abcdef";
@@ -244,6 +242,7 @@ struct DecodeCtx {
     size_t                    file_size   = 0;
     size_t                    data_offset = 0;
     size_t                    read_pos    = 0;
+    bool                      chunk_failed = false;
     ChunkCache                cache;
     const std::atomic<bool>  *stop_flag  = nullptr;
 
@@ -272,7 +271,7 @@ size_t ov_read_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
 
         const uint8_t *chunk = ctx->cache.get(ctx->cdn_url, ctx->aes_key,
                                                ci, ctx->file_size, ctx->stop_flag);
-        if (!chunk) { WHBLogPrint("audio: chunk fetch failed"); return 0; }
+        if (!chunk) { printf("audio: chunk fetch failed\n"); ctx->chunk_failed = true; return 0; }
 
         size_t chunk_end = std::min((ci + 1) * CHUNK_SIZE, ctx->file_size);
         size_t avail     = std::min(chunk_end - fp, want - done);
@@ -357,7 +356,6 @@ void AudioPipeline::fill_audio(uint8_t *stream, int len) {
 // ── Decode thread ─────────────────────────────────────────────────────────────
 
 void AudioPipeline::decode_thread_fn() {
-    OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU2);
     DecodeCtx ctx;
     ctx.cdn_url   = cdn_url_;
     ctx.aes_key   = aes_key_;
@@ -369,7 +367,7 @@ void AudioPipeline::decode_thread_fn() {
         size_t sz = 0;
         std::vector<uint8_t> tmp;
         if (!fetch_range(ctx.cdn_url, 0, CHUNK_SIZE - 1, tmp, sz, &stop_flag_) || sz == 0) {
-            WHBLogPrint("audio: initial fetch failed");
+            printf("audio: initial fetch failed\n");
             if (!stop_flag_.load() && on_fetch_error) on_fetch_error();
             return;
         }
@@ -378,7 +376,7 @@ void AudioPipeline::decode_thread_fn() {
         aes_ctr_decrypt(ctx.aes_key, 0, tmp.data(), tmp.size());
         ctx.cache.slots[0] = {0, std::move(tmp)};
         ctx.cache.next = 1;
-        WHBLogPrintf("audio: file_size=%zu", ctx.file_size);
+        printf("audio: file_size=%zu\n", ctx.file_size);
     }
 
     // Detect and skip the Spotify OGG metadata header page.
@@ -391,33 +389,36 @@ void AudioPipeline::decode_thread_fn() {
             if (d[i]   == 0x4F && d[i+1] == 0x67 &&
                 d[i+2] == 0x67 && d[i+3] == 0x53) {
                 ctx.data_offset = i;
-                WHBLogPrintf("audio: Spotify OGG header %zu bytes; Vorbis at %zu",
-                             i, i);
+                printf("audio: Spotify OGG header %zu bytes; Vorbis at %zu\n", i, i);
                 break;
             }
         }
         if (ctx.data_offset == 0)
-            WHBLogPrint("audio: no Spotify OGG header found — reading from byte 0");
+            printf("audio: no Spotify OGG header found -- reading from byte 0\n");
     }
 
     // Open Vorbis
     ov_callbacks cbs = {ov_read_cb, ov_seek_cb, ov_close_cb, ov_tell_cb};
     if (ov_open_callbacks(&ctx, &vf_, nullptr, 0, cbs) < 0) {
-        WHBLogPrint("audio: ov_open_callbacks failed");
-        if (!stop_flag_.load() && on_track_end) on_track_end();
+        printf("audio: ov_open_callbacks failed (data_off=%zu file_sz=%zu)\n",
+               ctx.data_offset, ctx.file_size);
+        if (!stop_flag_.load() && on_fetch_error) on_fetch_error();
         return;
     }
     vf_open_ = true;
+    printf("audio: vorbis opened (total_ms=%lld)\n", (long long)ov_time_total(&vf_, -1));
 
-    // Apply start seek (Tremor ov_time_seek uses milliseconds)
+    // Seek to start (always explicit so Tremor is positioned at the audio start
+    // regardless of where its internal scan left read_pos).
     int start = seek_ms_.exchange(-1);
-    if (start > 0) ov_time_seek(&vf_, (ogg_int64_t)start);
+    ov_time_seek(&vf_, (ogg_int64_t)(start > 0 ? start : 0));
 
     playing_.store(true);
-    WHBLogPrint("audio: decode loop");
+    printf("audio: decode loop\n");
 
+    int hole_count = 0;
     while (!stop_flag_.load()) {
-        if (paused_.load()) { OSSleepTicks(OSMillisecondsToTicks(10)); continue; }
+        if (paused_.load()) { plat_sleep_ms(10); continue; }
 
         // Check for pending seek
         int sm = seek_ms_.exchange(-1);
@@ -428,7 +429,7 @@ void AudioPipeline::decode_thread_fn() {
             std::lock_guard<std::mutex> lk(pcm_mu_);
             size_t used = pcm_write_ - pcm_read_;
             if (used + 2048 >= PCM_RING_CAP) {
-                OSSleepTicks(OSMillisecondsToTicks(5));
+                plat_sleep_ms(5);
                 continue;
             }
         }
@@ -437,8 +438,13 @@ void AudioPipeline::decode_thread_fn() {
         char buf[4096];
         int  bs  = 0;
         long ret = ov_read(&vf_, buf, (int)sizeof(buf), &bs);
-        if (ret < 0)  { WHBLogPrintf("audio: ov_read error %ld", ret); break; }
-        if (ret == 0) { WHBLogPrint("audio: end of stream"); break; }
+        if (ret == OV_HOLE) {
+            // Non-fatal data gap; Tremor docs say caller should retry.
+            if (++hole_count <= 5) printf("audio: OV_HOLE (count=%d)\n", hole_count);
+            continue;
+        }
+        if (ret < 0)  { printf("audio: ov_read error %ld\n", ret); break; }
+        if (ret == 0) { printf("audio: end of stream\n"); break; }
 
         size_t samples = (size_t)ret / sizeof(int16_t);
         {
@@ -457,8 +463,14 @@ void AudioPipeline::decode_thread_fn() {
     if (vf_open_) { ov_clear(&vf_); vf_open_ = false; }
     playing_.store(false);
 
-    if (!stop_flag_.load() && on_track_end) on_track_end();
-    WHBLogPrint("audio: decode thread exited");
+    if (!stop_flag_.load()) {
+        if (ctx.chunk_failed) {
+            if (on_fetch_error) on_fetch_error();
+        } else {
+            if (on_track_end) on_track_end();
+        }
+    }
+    printf("audio: decode thread exited\n");
 }
 
 // ── AX DRC stubs ──────────────────────────────────────────────────────────────
@@ -474,7 +486,7 @@ AudioPipeline::~AudioPipeline() { shutdown(); }
 
 bool AudioPipeline::init() {
     if (SDL_Init(SDL_INIT_AUDIO) < 0) {
-        WHBLogPrintf("audio: SDL_Init(AUDIO): %s", SDL_GetError());
+        printf("audio: SDL_Init(AUDIO): %s\n", SDL_GetError());
         return false;
     }
 
@@ -488,7 +500,7 @@ bool AudioPipeline::init() {
 
     sdl_dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &got, 0);
     if (!sdl_dev_) {
-        WHBLogPrintf("audio: SDL_OpenAudioDevice: %s", SDL_GetError());
+        printf("audio: SDL_OpenAudioDevice: %s\n", SDL_GetError());
         return false;
     }
 
@@ -496,15 +508,17 @@ bool AudioPipeline::init() {
     SDL_PauseAudioDevice(sdl_dev_, 0);  // start in running state (silent until decode)
 
     cache_stop_.store(false);
-    cache_thread_ = std::thread(&AudioPipeline::cache_cleanup_fn, this);
+    { pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1024*1024);
+      pthread_create(&cache_thread_, &a, [](void *v) -> void* { static_cast<AudioPipeline*>(v)->cache_cleanup_fn(); return nullptr; }, this);
+      pthread_attr_destroy(&a); }
 
-    WHBLogPrint("audio: device opened");
+    printf("audio: device opened\n");
     return true;
 }
 
 void AudioPipeline::shutdown() {
     cache_stop_.store(true);
-    if (cache_thread_.joinable()) cache_thread_.join();
+    if (cache_thread_) { pthread_join(cache_thread_, nullptr); cache_thread_ = 0; }
 
     stop();
     ax_shutdown();
@@ -532,7 +546,9 @@ bool AudioPipeline::play(const std::string &cdn_url,
         crystal_prev_l_ = crystal_prev_r_ = 0;
     }
 
-    decode_thread_ = std::thread(&AudioPipeline::decode_thread_fn, this);
+    { pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1024*1024);
+      pthread_create(&decode_thread_, &a, [](void *v) -> void* { static_cast<AudioPipeline*>(v)->decode_thread_fn(); return nullptr; }, this);
+      pthread_attr_destroy(&a); }
     return true;
 }
 
@@ -553,7 +569,7 @@ void AudioPipeline::seek(int pos_ms) {
 void AudioPipeline::stop() {
     stop_flag_.store(true);
     paused_.store(false);
-    if (decode_thread_.joinable()) decode_thread_.join();
+    if (decode_thread_) { pthread_join(decode_thread_, nullptr); decode_thread_ = 0; }
     if (vf_open_) { ov_clear(&vf_); vf_open_ = false; }
     playing_.store(false);
     stop_flag_.store(false);
@@ -579,7 +595,7 @@ void AudioPipeline::get_pcm_snapshot(float *buf, int n) {
 
 void AudioPipeline::set_crystalizer(bool enabled, int strength) {
     strength = std::max(1, std::min(25, strength));
-    crystal_gain_.store(strength * 25);   // 25–625, interpreted as gain/256
+    crystal_gain_.store(strength * 25);   // 25-625, interpreted as gain/256
     crystal_enabled_.store(enabled);
 }
 
@@ -597,19 +613,19 @@ int AudioPipeline::position_ms() const {
 
 // ── Cache retention thread ─────────────────────────────────────────────────────
 //
-// Runs on CPU0, sweeps /vol/external01/spotify_cache once per hour.
+// Sweeps sdmc:/spotify_cache once per hour.
 // Deletes chunk files (CACHE_BASE/{file_id_hex}/{chunk_idx}) whose mtime is
 // older than the configured max age (default 3 days), then removes empty track directories.
 // FAT32 on the SD card reports write-time in st_mtime with 2-second precision.
 
-// Same path as CACHE_BASE above — reuse directly so there's one source of truth.
+// Same path as CACHE_BASE above -- reuse directly so there's one source of truth.
 #define CACHE_GC_BASE    CACHE_BASE
 static constexpr int    CACHE_GC_INTERVAL_SEC = 3600;  // 1 hour
 
 // Read max_age_days from the plugin config file; fall back to 3 if absent.
 static time_t read_max_age_secs() {
     int max_age_days = 3;
-    // Build the path at runtime — CACHE_BASE is a const char*, not a macro literal.
+    // Build the path at runtime -- CACHE_BASE is a const char*, not a macro literal.
     char config_path[256];
     snprintf(config_path, sizeof(config_path), "%s/.plugin_config", CACHE_BASE);
     FILE *f = fopen(config_path, "r");
@@ -634,11 +650,9 @@ struct CacheRow {
 };
 
 void AudioPipeline::cache_cleanup_fn() {
-    OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-
     // Delay first sweep so startup I/O doesn't compete with app init.
     for (int i = 0; i < 15 && !cache_stop_.load(); ++i)
-        OSSleepTicks(OSMillisecondsToTicks(1000));
+        plat_sleep_ms(1000);
 
     while (!cache_stop_.load()) {
         time_t cutoff = time(nullptr) - read_max_age_secs();
@@ -657,7 +671,7 @@ void AudioPipeline::cache_cleanup_fn() {
                 snprintf(tdir, sizeof(tdir), "%s/%s", CACHE_GC_BASE, tde->d_name);
 
                 // Read two-line .timestamp: line 1 = cached_at, line 2 = last_played_at.
-                // Directories without one are mid-setup — skip.
+                // Directories without one are mid-setup -- skip.
                 char ts_path[560];
                 snprintf(ts_path, sizeof(ts_path), "%s/.timestamp", tdir);
                 FILE *tf = fopen(ts_path, "r");
@@ -731,13 +745,13 @@ void AudioPipeline::cache_cleanup_fn() {
         cache_total_bytes_.store((int32_t)(total_bytes / 1024));
 
         if (evicted_tracks)
-            WHBLogPrintf("cache: evicted %d tracks (%d chunks) outside max age",
-                         evicted_tracks, evicted_chunks);
-        WHBLogPrintf("cache: %zu tracks, %.1f MB total",
-                     rows.size(), total_bytes / (1024.0 * 1024.0));
+            printf("cache: evicted %d tracks (%d chunks) outside max age\n",
+                   evicted_tracks, evicted_chunks);
+        printf("cache: %zu tracks, %.1f MB total\n",
+               rows.size(), total_bytes / (1024.0 * 1024.0));
 
         for (int i = 0; i < CACHE_GC_INTERVAL_SEC && !cache_stop_.load(); ++i)
-            OSSleepTicks(OSMillisecondsToTicks(1000));
+            plat_sleep_ms(1000);
     }
 }
 

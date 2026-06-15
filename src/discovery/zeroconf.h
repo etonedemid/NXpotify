@@ -2,14 +2,14 @@
 #include <string>
 #include <vector>
 #include <functional>
-#include <thread>
+#include <pthread.h>
 #include <atomic>
 #include <cstdint>
 #include <mbedtls/dhm.h>
 
 namespace Discovery {
 
-// Credentials extracted from Zeroconf — handed to the AP layer for login.
+// Credentials extracted from Zeroconf -- handed to the AP layer for login.
 // auth_type mirrors Spotify's AuthenticationType proto enum:
 //   0x00 = AUTHENTICATION_USER_PASS
 //   0x01 = AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS  (old blob flow)
@@ -23,9 +23,9 @@ struct Credentials {
 };
 
 // Zeroconf runs two background threads:
-//   mdns_thread_  — sends periodic mDNS announcements and answers PTR/SRV/TXT
+//   mdns_thread_  -- sends periodic mDNS announcements and answers PTR/SRV/TXT
 //                   queries on 224.0.0.251:5353 for _spotify-connect._tcp
-//   http_thread_  — minimal TCP HTTP server; handles:
+//   http_thread_  -- minimal TCP HTTP server; handles:
 //                     GET  /zc?action=getInfo  → JSON device info + DH public key
 //                     POST /zc?action=addUser  → decrypt blob → call on_creds
 //
@@ -47,7 +47,7 @@ public:
     const std::string &device_name() const { return device_name_; }
     const std::string &device_id()   const { return device_id_; }
 
-    // Call after AP login succeeds — written into every subsequent getInfo response.
+    // Call after AP login succeeds -- written into every subsequent getInfo response.
     void set_active_user(const std::string &username) { active_user_ = username; }
 
 private:
@@ -93,8 +93,8 @@ private:
 
     std::function<void(Credentials)> on_creds_;
     std::function<void(std::string)> on_error_;
-    std::thread         mdns_thread_;
-    std::thread         http_thread_;
+    pthread_t           mdns_thread_ = 0;
+    pthread_t           http_thread_ = 0;
     std::atomic<bool>   stop_{false};
 };
 

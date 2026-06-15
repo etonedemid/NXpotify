@@ -7,17 +7,18 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <pthread.h>
 #include "dealer.h"
 
 namespace Connect {
 
 class AP;
 
-// Spirc v1 — Spotify Remote Procedure Call protocol.
+// Spirc v1 -- Spotify Remote Procedure Call protocol.
 //
 // Subscribes to:
-//   hm://remote/3/user/{username}/              — broadcast channel
-//   hm://remote/3/user/{username}/{device_id}/  — targeted channel
+//   hm://remote/3/user/{username}/              -- broadcast channel
+//   hm://remote/3/user/{username}/{device_id}/  -- targeted channel
 //
 // Sends outbound Frames (Hello on start, Notify on every state change)
 // to hm://remote/3/user/{username}/ over Mercury (0xB2 MercuryReq).
@@ -50,10 +51,10 @@ public:
         // Fired on Seek command.
         std::function<void(int pos_ms)> on_seek;
 
-        // Fired on Volume command (volume_pct: 0–100).
+        // Fired on Volume command (volume_pct: 0-100).
         std::function<void(int vol_pct)> on_volume;
 
-        // Fired after metadata fetch — display info for the track.
+        // Fired after metadata fetch -- display info for the track.
         std::function<void(const std::string &title,
                            const std::string &artist,
                            const std::string &art_url,
@@ -63,7 +64,7 @@ public:
                            const std::string &isrc)> on_track_changed;
 
         // Fired when a cluster update confirms another device became active while
-        // we were playing — user transferred playback away from us.
+        // we were playing -- user transferred playback away from us.
         std::function<void()> on_became_inactive;
 
         // Fired once the SPIRC_HELLO PUT succeeds and Spotify can route commands
@@ -87,7 +88,7 @@ public:
     // Update Spirc's internal state so outbound Notify frames stay accurate.
     void notify(bool playing, int pos_ms, int vol_pct);
 
-    // Local skip/seek — same effect as receiving Next/Prev/Seek from the app.
+    // Local skip/seek -- same effect as receiving Next/Prev/Seek from the app.
     void skip(bool next_track);
     void seek_to(int pos_ms);
 
@@ -105,7 +106,7 @@ public:
     // Use instead of notify(false,...) when the audio pipeline drains naturally.
     void notify_track_end(int vol_pct);
 
-    // Synchronous goodbye PUT before app exit — marks this device inactive so
+    // Synchronous goodbye PUT before app exit -- marks this device inactive so
     // Spotify removes it from the active session immediately.
     void goodbye();
 
@@ -145,6 +146,7 @@ private:
                                const std::vector<uint8_t> &payload);
     bool handle_dealer_request(const std::string &message_ident,
                                const std::string &cmd_json);
+    void dealer_init_();   // runs on dealer_init_pth_: token + spclient resolve + dealer_.start()
 
     // ── Metadata ─────────────────────────────────────────────────────────────
     void fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms);
@@ -166,7 +168,7 @@ private:
     std::vector<uint8_t> build_device_info_cs(int vol_pct);
     // Assemble PutStateRequest bytes on the calling thread, then PUT in a background thread.
     void put_connect_state_async(uint32_t reason, bool playing, int pos_ms, int vol_pct);
-    // Blocking HTTP PUT — run only from detached threads.
+    // Blocking HTTP PUT -- run only from detached threads.
     long put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bool playing);
 
     // ── Frame / wire builders ─────────────────────────────────────────────────
@@ -215,7 +217,7 @@ private:
     std::map<uint32_t, PendingReq> pending_;
     std::mutex                     pending_mu_;
 
-    // Cached access_token from login5.spotify.com — fetched lazily on first CDN resolve.
+    // Cached access_token from login5.spotify.com -- fetched lazily on first CDN resolve.
     std::string  access_token_;
     std::mutex   token_mu_;
 
@@ -235,9 +237,9 @@ private:
     // BECAME_INACTIVE). The next active=ours after this flag is a genuine re-activation.
     std::atomic<bool> saw_inactive_cluster_{false};
 
-    // Dealer WebSocket — provides the connection_id for connect-state
+    // Dealer WebSocket -- provides the connection_id for connect-state
     Dealer            dealer_;
-    std::thread       dealer_init_thread_;     // fetches token then starts dealer_
+    pthread_t         dealer_init_pth_ = 0;    // fetches token then starts dealer_
 };
 
 } // namespace Connect

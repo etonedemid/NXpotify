@@ -2,7 +2,7 @@
 #include <cstring>
 #include <cmath>
 #include <sstream>
-#include <whb/log.h>
+#include "platform.h"
 
 namespace UI {
 

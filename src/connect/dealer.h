@@ -2,7 +2,7 @@
 #include <string>
 #include <functional>
 #include <atomic>
-#include <thread>
+#include <pthread.h>
 #include <vector>
 #include <cstdint>
 
@@ -22,14 +22,14 @@ public:
     using ConnIdCallback = std::function<void(const std::string &connection_id)>;
 
     // Called for every incoming subscription message (from the Dealer thread).
-    // uri     — the hm:// URI from the JSON "uri" field
-    // payload — base64-decoded first element of the JSON "payloads" array
+    // uri     -- the hm:// URI from the JSON "uri" field
+    // payload -- base64-decoded first element of the JSON "payloads" array
     using MessageCallback = std::function<void(const std::string &uri,
                                                const std::vector<uint8_t> &payload)>;
 
     // Called for incoming player-command requests (from the Dealer thread).
-    // message_ident — the hm:// URI identifying the command routing
-    // cmd_json      — decoded JSON string with "endpoint", "message_id", etc.
+    // message_ident -- the hm:// URI identifying the command routing
+    // cmd_json      -- decoded JSON string with "endpoint", "message_id", etc.
     // Return true to reply {"success":true}, false for {"success":false}.
     using RequestCallback = std::function<bool(const std::string &message_ident,
                                                const std::string &cmd_json)>;
@@ -51,7 +51,7 @@ private:
              MessageCallback msg_cb, RequestCallback req_cb);
 
     std::atomic<bool> stop_{false};
-    std::thread       thread_;
+    pthread_t         thread_ = 0;
 };
 
 } // namespace Connect

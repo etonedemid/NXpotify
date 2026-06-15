@@ -5,7 +5,7 @@
 
 namespace OLV {
 
-// ── Permanent OLV identity — MUST NOT CHANGE after first release ──────────────
+// ── Permanent OLV identity -- MUST NOT CHANGE after first release ──────────────
 // These three values identify this app to Roséverse. Changing them after release
 // would orphan all existing posts and break community association.
 static constexpr uint32_t COMMUNITY_ID = 157;
@@ -21,7 +21,7 @@ struct Post {
     std::string body;
     std::string screen_name;
     std::string post_id;      // nn::olv post identifier; empty if unavailable
-    int         feeling;      // 0–5
+    int         feeling;      // 0-5
     uint32_t    position_ms;  // track position when posted; 0 = no metadata
     uint32_t    duration_ms;  // track duration at post time;  0 = no metadata
     // Raw TGA bytes from GetBodyMemo (320×120 BGRA from lower-left); empty = text-only post.
@@ -81,7 +81,7 @@ std::vector<Post> fetch_posts(uint32_t community_id, uint32_t limit,
 // position_ms / duration_ms are embedded in the post's hidden app-data binary so that
 // clients can show posts anchored to their track timestamp. Pass 0/0 if unknown.
 // Stamps loaded from /vol/content/stamps/ at init time are added automatically.
-// Blocking — returns after the user posts or cancels.
+// Blocking -- returns after the user posts or cancels.
 void open_post_applet(const std::string &body_utf8, bool is_explicit,
                       const std::string &title, const std::string &search_key,
                       uint32_t position_ms, uint32_t duration_ms);

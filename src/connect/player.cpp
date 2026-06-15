@@ -2,25 +2,92 @@
 #include "ap.h"
 #include "spirc.h"
 #include "audio.h"
-#include "../olv/olv.h"
 
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <algorithm>
 #include <mutex>
+#include <thread>
+#include <pthread.h>
 
-#include <vpad/input.h>
-#include <padscore/kpad.h>
-#include <whb/proc.h>
-#include <whb/log.h>
-#include <whb/sdcard.h>
-#include <coreinit/time.h>
-#include <coreinit/thread.h>
-#include <proc_ui/procui.h>
+#include <switch.h>
+#include <curl/curl.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 
+extern "C" {
+#include "cJSON/cJSON.h"
+}
+
+#include "platform.h"
+
 namespace Connect {
+
+// ── HTTP helpers used by device_auth() ───────────────────────────────────────
+
+static size_t da_write_str(char *ptr, size_t sz, size_t n, void *ud) {
+    reinterpret_cast<std::string *>(ud)->append(ptr, sz * n);
+    return sz * n;
+}
+
+static size_t da_write_vec(char *ptr, size_t sz, size_t n, void *ud) {
+    auto *v = reinterpret_cast<std::vector<uint8_t> *>(ud);
+    v->insert(v->end(), reinterpret_cast<uint8_t *>(ptr),
+              reinterpret_cast<uint8_t *>(ptr) + sz * n);
+    return sz * n;
+}
+
+static std::string da_post(const char *url, const std::string &body) {
+    std::string resp;
+    CURL *c = curl_easy_init();
+    if (!c) return resp;
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, da_write_str);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(c, CURLOPT_VERBOSE, 0L);
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 1L);
+    // Prevent curl from adding Accept-Encoding which yields compressed responses
+    curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
+    CURLcode rc = curl_easy_perform(c);
+    curl_easy_cleanup(c);
+    PLAT_LOGF("da_post: rc=%d resp_len=%zu", (int)rc, resp.size());
+    return resp;
+}
+
+static std::vector<uint8_t> da_get_bytes(const std::string &url) {
+    std::vector<uint8_t> data;
+    CURL *c = curl_easy_init();
+    if (!c) return data;
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, da_write_vec);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &data);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+    curl_easy_perform(c);
+    curl_easy_cleanup(c);
+    return data;
+}
+
+static std::string da_urlencode(const std::string &s) {
+    std::string out;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += (char)c;
+        } else {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%%%02X", c);
+            out += buf;
+        }
+    }
+    return out;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -43,11 +110,10 @@ static std::string make_device_id() {
     return s;
 }
 
-
 // ── Constructor / destructor ──────────────────────────────────────────────────
 
 Player::Player()
-    : zeroconf_("Wii U", make_device_id()),
+    : zeroconf_("Switch", make_device_id()),
       ap_(std::make_unique<AP>()),
       audio_(std::make_unique<AudioPipeline>())
 {}
@@ -60,46 +126,29 @@ Player::~Player() {
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
 void Player::run() {
-    OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU1);
-    // Font is embedded in the binary; pass nullptr so display falls back to it.
-    // If a font file exists on the SD card it will be preferred automatically.
+    // Font is optional -- loaded from SD card if present; nullptr = use embedded fallback.
+    static char font_path_buf[256];
+    snprintf(font_path_buf, sizeof(font_path_buf),
+             "%s/switch/nxpotify/font.ttf", SD_ROOT);
     const char *font_path = nullptr;
-    if (const char *sd = WHBGetSdCardMountPath()) {
-        static char sd_font[256];
-        snprintf(sd_font, sizeof(sd_font),
-                 "%s/wiiu/apps/spotify-wiiu/font.ttf", sd);
-        if (FILE *f = fopen(sd_font, "rb")) { fclose(f); font_path = sd_font; }
-    }
-    KPADInit();
-    WPADEnableURCC(TRUE);  // must be called explicitly to allow Pro Controllers to connect
+    if (FILE *f = fopen(font_path_buf, "rb")) { fclose(f); font_path = font_path_buf; }
 
-    ProcUIRegisterCallback(PROCUI_CALLBACK_RELEASE,
-        [](void *) -> uint32_t {
-            WHBLogPrint("player: entered background");
-            // Signal the cache-sweep WUPS plugin to run a sweep.
-            FILE *flag = fopen("/vol/external01/spotify_cache/.sweep_now", "w");
-            if (flag) fclose(flag);
-            return 0;
-        }, nullptr, 100);
-    ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE,
-        [](void *) -> uint32_t {
-            WHBLogPrint("player: returned to foreground");
-            return 0;
-        }, nullptr, 100);
+    // Switch pad init
+    PadState pad;
+    padConfigureInput(1, HidNpadStyleTag_NpadFullKey);
+    padInitializeDefault(&pad);
 
+    PLAT_LOG("player: init display");
     if (!display_.init(font_path))
-        WHBLogPrint("player: display init failed");
+        PLAT_LOG("player: display init failed");
+    PLAT_LOG("player: display OK");
     display_.set_audio(audio_.get());
     display_.set_waiting();
 
-    // Initialise OLV in background (blocks on network; detects Roséverse).
-    olv_init_thread_ = std::thread([this] {
-        OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-        OLV::init();
-    });
-
+    PLAT_LOG("player: init audio");
     if (!audio_->init())
-        WHBLogPrint("player: audio init failed");
+        PLAT_LOG("player: audio init failed");
+    PLAT_LOG("player: audio OK");
 
     audio_->on_track_end = [this] {
         spirc_playing_ = false;
@@ -112,182 +161,218 @@ void Player::run() {
         state_.store(State::Ready);
     };
 
-    // CDN fetch failed (not aborted by stop()) — reset to waiting without
-    // telling Spotify the track ended, which would cause it to auto-resend
-    // the same track and loop indefinitely.
+    // CDN fetch failed (not aborted by stop()) -- reset without telling Spotify the
+    // track ended (that would cause it to auto-resend and loop indefinitely).
     audio_->on_fetch_error = [this] {
-        WHBLogPrint("player: CDN fetch error — resetting to waiting");
+        PLAT_LOG("player: CDN fetch error -- resetting to waiting");
         spirc_playing_ = false;
         state_.store(State::WaitingForUser);
         display_.set_waiting();
     };
 
     zeroconf_.start([this](Discovery::Credentials creds) {
-        // Must not block the Zeroconf HTTP thread, so we spawn a separate thread.
-        // Release the previous handle (detach if still running — ap_->disconnect()
-        // will unblock it during cleanup, and zeroconf_.stop()'s ~200 ms join gives
-        // it time to exit before Player is destroyed).
-        if (connect_thread_.joinable())
-            connect_thread_.detach();
-        connect_thread_ = std::thread([this, creds = std::move(creds)]() mutable {
-            OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-            on_credentials(std::move(creds));
-        });
+        // Detach any prior connect thread before launching a new one.
+        if (connect_pth_) { pthread_detach(connect_pth_); connect_pth_ = 0; }
+        // Heap-allocate args so they survive until the thread picks them up.
+        struct Arg { Player *p; Discovery::Credentials creds; };
+        auto *arg = new Arg{this, std::move(creds)};
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 1024 * 1024);  // AP TLS needs large stack
+        pthread_create(&connect_pth_, &attr, [](void *vp) -> void* {
+            auto *a = static_cast<Arg*>(vp);
+            a->p->on_credentials(std::move(a->creds));
+            delete a;
+            return nullptr;
+        }, arg);
+        pthread_attr_destroy(&attr);
     }, [this](std::string msg) {
         display_.set_error(std::move(msg));
     });
 
-    WHBLogPrint("player: waiting for Spotify app...");
+    // If no saved credentials exist, run the device auth flow in the background.
+    // The main loop below keeps rendering frames so the QR screen is live.
+    {
+        FILE *f = fopen(SD_ROOT "/spotify_saved_creds.bin", "rb");
+        if (f) {
+            fclose(f);
+            PLAT_LOG("player: saved credentials found");
+        } else {
+            PLAT_LOG("player: no saved credentials -- starting device auth");
+            // curl's TLS stack is deep; std::thread default stack is too small.
+            // Use pthread directly with 1 MB so curl_easy_perform doesn't overflow.
+            pthread_t da_tid;
+            pthread_attr_t da_attr;
+            pthread_attr_init(&da_attr);
+            pthread_attr_setstacksize(&da_attr, 1024 * 1024);
+            pthread_create(&da_tid, &da_attr,
+                [](void *arg) -> void* {
+                    reinterpret_cast<Player*>(arg)->device_auth();
+                    return nullptr;
+                }, this);
+            pthread_attr_destroy(&da_attr);
+            pthread_detach(da_tid);
+        }
+    }
 
+    PLAT_LOG("player: entering main loop");
 
-    VPADStatus    vpad{};
-    VPADReadError verr{};
-    uint64_t      last_notify_tick = 0;
+    uint64_t last_notify_tick = 0;
 
-    while (WHBProcIsRunning()) {
+    while (plat_running()) {
         display_.render();
 
-        VPADRead(VPAD_CHAN_0, &vpad, 1, &verr);
-        if (verr == VPAD_READ_SUCCESS) {
-            handle_buttons(vpad.trigger);
-            handle_touch(&vpad);
-        }
-
-        KPADStatus kpad{};
-        KPADError  kerr{};
-        for (int ch = 0; ch < 4; ++ch) {
-            if (KPADReadEx((KPADChan)ch, &kpad, 1, &kerr) <= 0 || kerr != KPAD_ERROR_OK)
-                continue;
-            if (kpad.extensionType == WPAD_EXT_PRO_CONTROLLER) {
-                // If the data format hasn't been switched yet, do it now and wait
-                // one frame for KPAD to start delivering valid pro.trigger data.
-                if (kpad.format != WPAD_FMT_PRO_CONTROLLER) {
-                    WPADSetDataFormat((WPADChan)ch, WPAD_FMT_PRO_CONTROLLER);
-                } else {
-                    handle_pro_buttons(kpad.pro.trigger);
-                }
-            } else {
-                handle_wiimote_buttons(kpad.trigger);
-            }
-        }
+        padUpdate(&pad);
+        display_.set_handheld(padIsHandheld(&pad));
+        u64 trigger = padGetButtonsDown(&pad);
+        if (trigger)
+            handle_buttons((uint32_t)(trigger & 0xFFFFFFFFULL));
+        handle_touch();
 
         // Send position Notify every 1 s so the Spotify app stays in sync.
-        // Fire whenever we are in Playing state, not only when audio is
-        // actively decoding — buffering/track-switch gaps must not go silent.
         if (spirc_playing_) {
             if (audio_->is_playing()) {
                 int pos = audio_->position_ms();
                 display_.set_progress(pos, track_dur_ms_, true);
             }
-            uint64_t now = OSGetSystemTick();
-            if (spirc_ && now - last_notify_tick >= OSSecondsToTicks(1)) {
+            uint64_t now = plat_ticks();
+            if (spirc_ && now - last_notify_tick >= plat_s_to_ticks(1)) {
                 spirc_->notify(true, audio_->position_ms(), volume_);
                 last_notify_tick = now;
             }
         }
 
-        // OLV card auto-advance while visible.
-        // Two modes depending on whether fetched posts carry timestamp metadata:
-        //   Timestamp mode: advance to the post whose position_ms best matches the
-        //     current track position; refresh the post list every 30 s.
-        //   Time-based fallback (no metadata): rotate every 5 s, refetch on wrap.
-        // Both modes enforce a 3 s minimum dwell before any advance.
-        if (OLV::is_available()) {
-            uint64_t now = OSGetSystemTick();
-            std::lock_guard<std::mutex> lk(olv_mu_);
-            if (!olv_fetching_) {
-                if (!olv_posts_.empty()) {
-                    bool dwell_ok = (now - olv_shown_at_ >= OSSecondsToTicks(3));
-                    if (olv_posts_[0].position_ms > 0) {
-                        // ── Timestamp mode ──────────────────────────────────────────
-                        if (dwell_ok) {
-                            uint32_t cur_pos = (uint32_t)std::max(0, audio_->position_ms());
-                            // Rightmost post whose timestamp has been reached.
-                            bool found = false;
-                            size_t target = 0;
-                            for (size_t i = 0; i < olv_posts_.size(); ++i) {
-                                if (olv_posts_[i].position_ms <= cur_pos) {
-                                    target = i;
-                                    found = true;
-                                }
-                            }
-                            if (found) {
-                                if (target != olv_post_idx_) {
-                                    olv_post_idx_ = target;
-                                    olv_show_current();
-                                }
-                            } else if (olv_post_idx_ != SIZE_MAX) {
-                                // User seeked back before the first post's timestamp.
-                                olv_post_idx_ = SIZE_MAX;
-                                display_.set_olv_post(nullptr);
-                            }
-                        }
-                    } else if (now - olv_last_advance_ >= OSSecondsToTicks(5)) {
-                        // ── Time-based fallback ──────────────────────────────────────
-                        // 5 s timer already exceeds the 3 s minimum; no extra check needed.
-                        olv_last_advance_ = now;
-                        olv_post_idx_ = (olv_post_idx_ + 1) % olv_posts_.size();
-                        olv_show_current();
-                    }
-                } else if (now - olv_last_advance_ >= OSSecondsToTicks(5)) {
-                    // No posts yet — kick off initial fetch.
-                    olv_last_advance_ = now;
-                    if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
-                    olv_fetching_ = true;
-                    olv_fetch_thread_ = std::thread([this] {
-                        OSSetThreadAffinity(OSGetCurrentThread(),
-                                            OS_THREAD_ATTRIB_AFFINITY_CPU0);
-                        olv_fetch(OLV::COMMUNITY_ID);
-                    });
-                }
-            }
-        }
-
-        OSSleepTicks(OSMillisecondsToTicks(16));
+        plat_sleep_ms(16);
     }
 
     // Tell Spotify this device is going away before closing the connection.
     if (spirc_) spirc_->goodbye();
 
-    // Disconnect AP first — shutdown(fd_) unblocks any recv_exact in the
-    // connect thread, causing it to exit quickly.
     if (ap_) ap_->disconnect();
-    if (connect_thread_.joinable()) connect_thread_.join();
+    if (connect_pth_) { pthread_join(connect_pth_, nullptr); connect_pth_ = 0; }
     zeroconf_.stop();
     if (spirc_) { spirc_->stop(); spirc_.reset(); }
     audio_->shutdown();
     display_.shutdown();
-
-    // OLV teardown — join threads then shut down the module.
-    if (olv_fetch_thread_.joinable()) olv_fetch_thread_.join();
-    if (olv_init_thread_.joinable())  olv_init_thread_.join();
-    OLV::shutdown();
 }
 
-// ── Credentials — connect to AP ───────────────────────────────────────────────
+// ── Device Authorization Grant (first-time Spotify login) ────────────────────
 
-void Player::on_credentials(Discovery::Credentials creds) {
-    // Drop duplicate pushes — the app often retries addUser while we're still
-    // mid-handshake.  The mutex ensures only one connect attempt runs at a time.
-    std::unique_lock<std::mutex> lk(connect_mu_, std::try_to_lock);
-    if (!lk) {
-        WHBLogPrint("player: ignoring duplicate credentials (already connecting)");
+static const char *SPOTIFY_CLIENT_ID = "65b708073fc0480ea92a077233ca87bd";
+static const char *DEVICE_AUTH_URL   = "https://accounts.spotify.com/oauth2/device/authorize";
+static const char *TOKEN_URL         = "https://accounts.spotify.com/api/token";
+
+void Player::device_auth() {
+    PLAT_LOG("player: device_auth: requesting device code");
+    std::string req_body = std::string("client_id=") + SPOTIFY_CLIENT_ID + "&scope=streaming";
+    std::string resp = da_post(DEVICE_AUTH_URL, req_body);
+    PLAT_LOGF("player: device_auth: got resp len=%zu", resp.size());
+    // Log only safe ASCII portion to avoid binary data going to log
+    for (char &ch : resp) if ((unsigned char)ch < 32 || (unsigned char)ch > 126) ch = '?';
+    PLAT_LOGF("player: device_auth response: %.300s", resp.c_str());
+
+    cJSON *root = cJSON_Parse(resp.c_str());
+    if (!root) {
+        PLAT_LOG("player: device_auth: JSON parse failed");
+        display_.set_error("Spotify login failed (network error)");
         return;
     }
-    WHBLogPrintf("player: credentials for '%s'", creds.username.c_str());
+
+    const char *device_code = cJSON_GetStringValue(cJSON_GetObjectItem(root, "device_code"));
+    const char *user_code   = cJSON_GetStringValue(cJSON_GetObjectItem(root, "user_code"));
+    const char *verify_uri  = cJSON_GetStringValue(cJSON_GetObjectItem(root, "verification_uri_complete"));
+    cJSON      *iv_item     = cJSON_GetObjectItem(root, "interval");
+    cJSON      *ex_item     = cJSON_GetObjectItem(root, "expires_in");
+
+    int poll_interval = iv_item ? (int)cJSON_GetNumberValue(iv_item) : 5;
+    int expires_in    = ex_item ? (int)cJSON_GetNumberValue(ex_item) : 300;
+
+    if (!device_code || !user_code || !verify_uri) {
+        PLAT_LOG("player: device_auth: missing fields in response");
+        cJSON_Delete(root);
+        display_.set_error("Spotify login failed (bad response)");
+        return;
+    }
+
+    PLAT_LOGF("player: device_auth: user_code=%s uri=%.80s", user_code, verify_uri);
+
+    // Fetch QR PNG from quickchart.io
+    std::string qr_url = std::string("https://quickchart.io/qr?text=")
+                       + da_urlencode(verify_uri) + "&size=300&margin=1&format=png";
+    std::vector<uint8_t> qr_png = da_get_bytes(qr_url);
+    PLAT_LOGF("player: device_auth: QR PNG %zu bytes", qr_png.size());
+
+    display_.set_login(user_code, qr_png);
+
+    std::string dc(device_code);
+    cJSON_Delete(root);
+
+    // Poll token endpoint
+    std::string poll_body = std::string("client_id=") + SPOTIFY_CLIENT_ID
+        + "&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
+        + "&device_code=" + da_urlencode(dc);
+
+    for (int elapsed = 0; plat_running() && elapsed < expires_in; elapsed += poll_interval) {
+        plat_sleep_ms(poll_interval * 1000);
+
+        std::string token_resp = da_post(TOKEN_URL, poll_body);
+        PLAT_LOGF("player: device_auth poll: %.120s", token_resp.c_str());
+
+        cJSON *tr = cJSON_Parse(token_resp.c_str());
+        if (!tr) continue;
+
+        const char *err = cJSON_GetStringValue(cJSON_GetObjectItem(tr, "error"));
+        if (err) {
+            if (strcmp(err, "slow_down") == 0)              poll_interval += 5;
+            else if (strcmp(err, "authorization_pending") == 0) { /* keep polling */ }
+            else {
+                PLAT_LOGF("player: device_auth poll error: %s", err);
+                cJSON_Delete(tr);
+                display_.set_error("Spotify login cancelled");
+                return;
+            }
+            cJSON_Delete(tr);
+            continue;
+        }
+
+        const char *access_token = cJSON_GetStringValue(cJSON_GetObjectItem(tr, "access_token"));
+        if (access_token) {
+            PLAT_LOG("player: device_auth: got access token");
+            Discovery::Credentials creds;
+            creds.username  = "";          // filled in by AP after login
+            creds.device_id = zeroconf_.device_id();
+            creds.auth_type = 0x03;        // AUTHENTICATION_SPOTIFY_TOKEN
+            creds.auth_data.assign(access_token, access_token + strlen(access_token));
+            cJSON_Delete(tr);
+            display_.set_waiting();
+            on_credentials(std::move(creds));
+            return;
+        }
+
+        cJSON_Delete(tr);
+    }
+
+    PLAT_LOG("player: device_auth: timed out");
+    display_.set_error("Spotify login timed out -- restart the app");
+}
+
+// ── Credentials -- connect to AP ───────────────────────────────────────────────
+
+void Player::on_credentials(Discovery::Credentials creds) {
+    std::unique_lock<std::mutex> lk(connect_mu_, std::try_to_lock);
+    if (!lk) {
+        PLAT_LOG("player: ignoring duplicate credentials (already connecting)");
+        return;
+    }
+    PLAT_LOGF("player: credentials for '%s'", creds.username.c_str());
     state_.store(State::Connecting);
 
-    // Clean up any previous connection (join defunct recv thread, close fd).
     if (spirc_) { spirc_->stop(); spirc_.reset(); }
     reconnecting_.store(true);
     if (ap_) ap_->disconnect();
     reconnecting_.store(false);
     ap_ = std::make_unique<AP>();
 
-    // Stamp this AP session with a generation number.  The on_disconnect closure
-    // captures it and returns immediately if it no longer matches — this safely
-    // discards late-firing callbacks from the old AP's recv thread without
-    // interfering with an already-live new session's audio or display state.
     uint32_t gen = ++ap_gen_;
 
     AP::Callbacks acb;
@@ -295,30 +380,26 @@ void Player::on_credentials(Discovery::Credentials creds) {
         on_ap_packet(cmd, std::move(pl));
     };
     acb.on_disconnect = [this, gen] {
-        if (ap_gen_.load() != gen) return;  // stale callback from a replaced AP
-        WHBLogPrint("player: AP disconnected");
+        if (ap_gen_.load() != gen) return;
+        PLAT_LOG("player: AP disconnected");
         state_.store(State::WaitingForUser);
         audio_->stop();
         spirc_playing_ = false;
         display_.set_waiting();
-        // If Spotify closed our AP (device switch, not our own reconnect), tell
-        // Spotify we're inactive via HTTP so the phone stops sending play commands
-        // to our dead AP and driving an activation loop.
         if (!reconnecting_.load() && spirc_)
             spirc_->become_inactive();
     };
 
     if (!ap_->connect(creds, std::move(acb))) {
-        WHBLogPrint("player: AP connect failed");
+        PLAT_LOG("player: AP connect failed");
         state_.store(State::WaitingForUser);
         display_.set_waiting();
         return;
     }
 
-    // AP connected — start Spirc
     spirc_ = std::make_unique<Spirc>(ap_.get(),
                                      ap_->canonical_username(),
-                                     "Wii U",
+                                     "Switch",
                                      zeroconf_.device_id());
 
     Spirc::Callbacks scb;
@@ -349,11 +430,6 @@ void Player::on_credentials(Discovery::Credentials creds) {
     scb.on_became_inactive = [this] {
         audio_->stop();
         spirc_playing_ = false;
-        {
-            std::lock_guard<std::mutex> lk(olv_mu_);
-            olv_posts_.clear();
-            olv_post_idx_ = SIZE_MAX;
-        }
         display_.set_olv_post(nullptr);
         display_.set_waiting();
     };
@@ -367,45 +443,39 @@ void Player::on_credentials(Discovery::Credentials creds) {
         on_track_changed(t, a, u, dur, expl, id, isrc);
     };
     scb.on_ready = [this] {
-        // Dealer connected and SPIRC_HELLO PUT succeeded — Spotify can now route
-        // commands to us.  Only clear the "Connecting…" flag; don't reset the
-        // display state in case music already started while the PUT was in-flight.
         display_.set_ready();
     };
 
     spirc_->start(std::move(scb));
-    display_.set_connecting();   // show "Connecting…" until on_ready fires
+    display_.set_connecting();
     state_.store(State::Ready);
     const std::string &canon = ap_->canonical_username();
     zeroconf_.set_active_user(canon);
-    WHBLogPrintf("player: connected as '%s'", canon.c_str());
+    PLAT_LOGF("player: connected as '%s'", canon.c_str());
 }
 
 // ── Spirc callbacks ───────────────────────────────────────────────────────────
 
 void Player::on_play(const std::string &track_uri, int position_ms) {
-    WHBLogPrintf("player: load '%s' @%dms", track_uri.c_str(), position_ms);
+    PLAT_LOGF("player: load '%s' @%dms", track_uri.c_str(), position_ms);
     audio_->stop();
     spirc_playing_ = true;
     state_.store(State::Playing);
-    // Audio starts when on_file_ready fires and we receive the AES key
 }
 
 void Player::on_file_ready(const std::vector<uint8_t> &file_id,
                             const std::vector<uint8_t> &track_gid,
                             int pos_ms) {
-    WHBLogPrint("player: file ready — resolving CDN URL");
+    PLAT_LOG("player: file ready -- resolving CDN URL");
 
-    // Step 1: resolve CDN URL via Mercury storage-resolve
     spirc_->resolve_cdn(file_id, [this, file_id, track_gid, pos_ms]
                         (bool ok, std::string cdn_url) {
         if (!ok || cdn_url.empty()) {
-            WHBLogPrint("player: CDN resolve failed");
+            PLAT_LOG("player: CDN resolve failed");
             return;
         }
-        WHBLogPrintf("player: CDN URL resolved, requesting AES key");
+        PLAT_LOG("player: CDN URL resolved, requesting AES key");
 
-        // Step 2: store CDN URL and request AES key from AP
         uint32_t seq;
         {
             std::lock_guard<std::mutex> lk(aes_mu_);
@@ -415,8 +485,6 @@ void Player::on_file_ready(const std::vector<uint8_t> &file_id,
             pending_pos_ms_  = pos_ms;
         }
 
-        // RequestKey payload: file_id(20) + track_gid(16) + seq(4 BE) + zero(2)
-        // Matches librespot audio_key.rs send_key_request byte order.
         std::vector<uint8_t> pkt;
         pkt.insert(pkt.end(), file_id.begin(),   file_id.end());
         pkt.insert(pkt.end(), track_gid.begin(), track_gid.end());
@@ -424,14 +492,13 @@ void Player::on_file_ready(const std::vector<uint8_t> &file_id,
         pkt.push_back((seq >>  8) & 0xFF); pkt.push_back( seq        & 0xFF);
         pkt.push_back(0x00); pkt.push_back(0x00);
 
-        // Debug: log file_id and track_gid
         {
             static const char hx[] = "0123456789abcdef";
             std::string fid_hex, gid_hex;
-            for (uint8_t b : file_id)  { fid_hex += hx[b>>4]; fid_hex += hx[b&0xF]; }
-            for (uint8_t b : track_gid){ gid_hex += hx[b>>4]; gid_hex += hx[b&0xF]; }
-            WHBLogPrintf("player: RequestKey file=%s gid=%s seq=%u",
-                         fid_hex.c_str(), gid_hex.c_str(), seq);
+            for (uint8_t b : file_id)   { fid_hex += hx[b>>4]; fid_hex += hx[b&0xF]; }
+            for (uint8_t b : track_gid) { gid_hex += hx[b>>4]; gid_hex += hx[b&0xF]; }
+            PLAT_LOGF("player: RequestKey file=%s gid=%s seq=%u",
+                      fid_hex.c_str(), gid_hex.c_str(), seq);
         }
 
         ap_->send_packet(Cmd::RequestKey, pkt);
@@ -440,15 +507,14 @@ void Player::on_file_ready(const std::vector<uint8_t> &file_id,
 
 void Player::on_ap_packet(uint8_t cmd, std::vector<uint8_t> payload) {
     if (cmd == Cmd::AesKey) {
-        // Payload: [4-byte seq BE][16-byte key]
         if (payload.size() < 20) {
-            WHBLogPrint("player: AesKey payload too short");
+            PLAT_LOG("player: AesKey payload too short");
             return;
         }
         std::vector<uint8_t> key(payload.begin() + 4, payload.begin() + 20);
 
-        std::string              cdn_url;
-        std::vector<uint8_t>     file_id;
+        std::string          cdn_url;
+        std::vector<uint8_t> file_id;
         int pos;
         {
             std::lock_guard<std::mutex> lk(aes_mu_);
@@ -457,21 +523,27 @@ void Player::on_ap_packet(uint8_t cmd, std::vector<uint8_t> payload) {
             pos     = pending_pos_ms_;
         }
         if (!cdn_url.empty()) {
-            WHBLogPrint("player: AES key received — starting audio");
+            PLAT_LOG("player: AES key received -- starting audio");
             audio_->set_volume(volume_);
             audio_->play(cdn_url, key, file_id, pos);
         }
     } else if (cmd == Cmd::AesKeyError) {
         uint16_t ec = (payload.size() >= 6)
             ? (uint16_t)((payload[4] << 8) | payload[5]) : 0xFFFF;
-        WHBLogPrintf("player: AES key error from AP code=0x%04X — skipping track", (unsigned)ec);
-        if (spirc_) spirc_->skip(true);
+        const char *reason = (ec == 0x0001) ? "NotEntitled (Spotify Premium required)"
+                           : (ec == 0x0002) ? "not allowed"
+                           :                  "unknown";
+        PLAT_LOGF("player: AES key error code=0x%04X (%s)", (unsigned)ec, reason);
+        // Do NOT auto-skip -- that creates an infinite skip loop when the whole
+        // account lacks entitlement.  Show an error and let the user decide.
+        display_.set_error(ec == 0x0001
+            ? "Audio key denied -- Spotify Premium required"
+            : "Audio key error -- cannot play track");
+        audio_->stop();
     } else if (spirc_) {
-        // Mercury responses (0xB2), events (0xB5), acks (0xB6), etc.
         spirc_->on_packet(cmd, std::move(payload));
     }
 }
-
 
 void Player::on_seek(int pos_ms) {
     audio_->seek(pos_ms);
@@ -493,77 +565,69 @@ void Player::on_track_changed(const std::string &title, const std::string &artis
     isrc_           = isrc;
     track_explicit_ = is_explicit;
     display_.set_track(title, artist, art_url, is_explicit);
-    {
-        std::lock_guard<std::mutex> lk(olv_mu_);
-        olv_posts_.clear();
-        olv_post_idx_ = SIZE_MAX;
-        olv_last_advance_ = 0;  // trigger immediate fetch on next main loop tick
-    }
-    display_.set_olv_post(nullptr);  // clear card immediately; refetch will repopulate it
+    display_.set_olv_post(nullptr);
 }
 
-// ── GamePad buttons ───────────────────────────────────────────────────────────
+// ── Switch controller buttons ─────────────────────────────────────────────────
 
 void Player::handle_buttons(uint32_t trigger) {
-    if (trigger & VPAD_BUTTON_PLUS) {
+    if (trigger & HidNpadButton_Plus) {
         volume_ = std::min(100, volume_ + 5);
         audio_->set_volume(volume_);
         display_.set_volume(volume_);
         if (spirc_) spirc_->notify(spirc_playing_, audio_->position_ms(), volume_);
     }
-    if (trigger & VPAD_BUTTON_MINUS) {
+    if (trigger & HidNpadButton_Minus) {
         volume_ = std::max(0, volume_ - 5);
         audio_->set_volume(volume_);
         display_.set_volume(volume_);
         if (spirc_) spirc_->notify(spirc_playing_, audio_->position_ms(), volume_);
     }
-    if ((trigger & VPAD_BUTTON_R) && spirc_) {
+    if ((trigger & HidNpadButton_R) && spirc_)
         spirc_->skip(true);
-    }
-    if ((trigger & VPAD_BUTTON_L) && spirc_) {
+    if ((trigger & HidNpadButton_L) && spirc_)
         spirc_->skip(false);
-    }
-    if ((trigger & VPAD_BUTTON_ZR) && spirc_ && spirc_playing_) {
+    if ((trigger & HidNpadButton_ZR) && spirc_ && spirc_playing_) {
         int pos = std::min(audio_->position_ms() + 5000, INT_MAX);
         audio_->seek(pos);
         spirc_->seek_to(pos);
     }
-    if ((trigger & VPAD_BUTTON_ZL) && spirc_ && spirc_playing_) {
+    if ((trigger & HidNpadButton_ZL) && spirc_ && spirc_playing_) {
         int pos = std::max(audio_->position_ms() - 5000, 0);
         audio_->seek(pos);
         spirc_->seek_to(pos);
     }
-    if (trigger & VPAD_BUTTON_UP) {
+    if (trigger & HidNpadButton_Up) {
         crystal_enabled_ = true;
         audio_->set_crystalizer(true, crystal_strength_);
         display_.set_crystalizer(true, crystal_strength_);
     }
-    if (trigger & VPAD_BUTTON_DOWN) {
+    if (trigger & HidNpadButton_Down) {
         crystal_enabled_ = false;
         audio_->set_crystalizer(false, crystal_strength_);
         display_.set_crystalizer(false, crystal_strength_);
     }
-    if (trigger & VPAD_BUTTON_RIGHT) {
+    if (trigger & HidNpadButton_Right) {
         crystal_strength_ = std::min(25, crystal_strength_ + 1);
         audio_->set_crystalizer(crystal_enabled_, crystal_strength_);
         display_.set_crystalizer(crystal_enabled_, crystal_strength_);
     }
-    if (trigger & VPAD_BUTTON_LEFT) {
+    if (trigger & HidNpadButton_Left) {
         crystal_strength_ = std::max(1, crystal_strength_ - 1);
         audio_->set_crystalizer(crystal_enabled_, crystal_strength_);
         display_.set_crystalizer(crystal_enabled_, crystal_strength_);
     }
-    if (trigger & VPAD_BUTTON_B)
+    if (trigger & HidNpadButton_B)
         display_.toggle_controls();
-    if ((trigger & VPAD_BUTTON_X) && spirc_) {
+    if ((trigger & HidNpadButton_X) && spirc_) {
         spirc_->toggle_shuffle();
         display_.set_shuffle(spirc_->shuffle());
     }
-    if ((trigger & VPAD_BUTTON_Y) && spirc_) {
+    if ((trigger & HidNpadButton_Y) && spirc_) {
         spirc_->toggle_repeat();
         display_.set_repeat(spirc_->repeat_mode());
     }
-    if ((trigger & VPAD_BUTTON_A) && spirc_) {
+    if ((trigger & HidNpadButton_A) && spirc_) {
         int pos = audio_->position_ms();
         if (spirc_playing_) {
             spirc_playing_ = false;
@@ -576,64 +640,30 @@ void Player::handle_buttons(uint32_t trigger) {
         }
         spirc_->notify(spirc_playing_, pos, volume_);
     }
-
-    // ── OLV: StickR = open current post (or community) in Roséverse ──────────
-    if ((trigger & VPAD_BUTTON_STICK_R) && OLV::is_available()) {
-        std::string post_id;
-        bool has_post = false;
-        {
-            std::lock_guard<std::mutex> lk(olv_mu_);
-            if (olv_post_idx_ != SIZE_MAX && olv_post_idx_ < olv_posts_.size()) {
-                post_id  = olv_posts_[olv_post_idx_].post_id;
-                has_post = true;
-            }
-        }
-        if (has_post) OLV::open_overlay(post_id);
-    }
-    if ((trigger & VPAD_BUTTON_STICK_L) && OLV::is_available() && spirc_playing_) {
-        if (!show_stamp_pack_picker()) return;
-        const std::string &post_key = isrc_.empty() ? track_id_ : isrc_;
-        OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, post_key,
-                              (uint32_t)std::max(0, audio_->position_ms()), (uint32_t)track_dur_ms_);
-    }
 }
 
-// ── GamePad touch ─────────────────────────────────────────────────────────────
+// ── Switch touchscreen ────────────────────────────────────────────────────────
 //
-// VPADGetTPCalibratedPoint returns physical DRC coordinates (0–853, 0–479).
-// The framebuffer is 1280×720, so we scale up: fx = tx*1280/854, fy = ty*720/480.
-// After scaling, coordinates are directly comparable to Theme:: constants.
-//
-// Touch zones (1280×720 framebuffer space, see theme.h):
-//   Progress bar seek : x 40–1240,  y 600–660  (expanded tap target around BAR_Y=620)
-//   Album art tap     : x 40–400,   y 60–420   → play/pause
-//   Swipe anywhere    : |dx| > 120, |dy| < 90  → next (left) / prev (right)
-//
-// Seek fires continuously while held; swipe and art-tap fire once on release.
+// Touch zones (1280×720 framebuffer space):
+//   Progress bar seek : x 40-1240, y 600-660
+//   Album art tap     : x 40-400,  y 60-420  → play/pause
+//   Swipe anywhere    : |dx| > 120, |dy| < 90 → next (left) / prev (right)
 
-void Player::handle_touch(const void *vpad_status_ptr) {
-    const VPADStatus &vpad = *static_cast<const VPADStatus *>(vpad_status_ptr);
+void Player::handle_touch() {
+    HidTouchScreenState ts{};
+    hidGetTouchScreenStates(&ts, 1);
 
-    VPADTouchData tp{};
-    // tpFiltered1 reduces resistive-touch noise; VPAD_TP_1280X720 maps directly to framebuffer space
-    VPADGetTPCalibratedPointEx(VPAD_CHAN_0, VPAD_TP_1280X720, &tp, &vpad.tpFiltered1);
-
-    if (!tp.touched) {
+    if (ts.count == 0) {
         if (touch_.active && !touch_.consumed && spirc_) {
             int dx = (int)touch_.cur_x - touch_.start_x;
             int dy = (int)touch_.cur_y - touch_.start_y;
 
-            // Horizontal swipe → next / prev track
             if (std::abs(dx) >= 120 && std::abs(dy) < 90) {
-                if (dx < 0)
-                    spirc_->skip(true);   // swipe left → next
-                else
-                    spirc_->skip(false);  // swipe right → prev
-            }
-            // Tap on album art → play/pause
-            else if (touch_.start_x >= 40  && touch_.start_x <= 400 &&
-                     touch_.start_y >= 60  && touch_.start_y <= 420 &&
-                     std::abs(dx) < 30 && std::abs(dy) < 30) {
+                if (dx < 0) spirc_->skip(true);
+                else        spirc_->skip(false);
+            } else if (touch_.start_x >= 40  && touch_.start_x <= 400 &&
+                       touch_.start_y >= 60  && touch_.start_y <= 420 &&
+                       std::abs(dx) < 30 && std::abs(dy) < 30) {
                 int pos = audio_->position_ms();
                 if (spirc_playing_) {
                     spirc_playing_ = false;
@@ -651,14 +681,8 @@ void Player::handle_touch(const void *vpad_status_ptr) {
         return;
     }
 
-    // Ignore frames with invalid calibration data — garbage coordinates from the
-    // resistive panel can otherwise fire the seek zone and set consumed=true,
-    // silently swallowing the next art-tap or swipe on release.
-    if (tp.validity != VPAD_VALID)
-        return;
-
-    const int fx = (int)tp.x;
-    const int fy = (int)tp.y;
+    const int fx = (int)ts.touches[0].x;
+    const int fy = (int)ts.touches[0].y;
 
     if (!touch_.active) {
         touch_.active   = true;
@@ -669,7 +693,6 @@ void Player::handle_touch(const void *vpad_status_ptr) {
     touch_.cur_x = (int16_t)fx;
     touch_.cur_y = (int16_t)fy;
 
-    // Progress bar: seek continuously while finger is held on bar
     if (!touch_.consumed &&
         fy >= 600 && fy <= 660 &&
         fx >= 40  && fx <= 1240 &&
@@ -680,389 +703,6 @@ void Player::handle_touch(const void *vpad_status_ptr) {
         spirc_->seek_to(pos_ms);
         touch_.consumed = true;
     }
-}
-
-void Player::handle_wiimote_buttons(uint32_t trigger) {
-    if (trigger & WPAD_BUTTON_B)
-        display_.toggle_controls();
-    if ((trigger & WPAD_BUTTON_PLUS) && spirc_) {
-        volume_ = std::min(100, volume_ + 5);
-        audio_->set_volume(volume_);
-        display_.set_volume(volume_);
-        spirc_->notify(spirc_playing_, audio_->position_ms(), volume_);
-    }
-    if ((trigger & WPAD_BUTTON_MINUS) && spirc_) {
-        volume_ = std::max(0, volume_ - 5);
-        audio_->set_volume(volume_);
-        display_.set_volume(volume_);
-        spirc_->notify(spirc_playing_, audio_->position_ms(), volume_);
-    }
-    if ((trigger & WPAD_BUTTON_RIGHT) && spirc_ && spirc_playing_) {
-        int pos = std::min(audio_->position_ms() + 5000, INT_MAX);
-        audio_->seek(pos);
-        spirc_->seek_to(pos);
-    }
-    if ((trigger & WPAD_BUTTON_LEFT) && spirc_ && spirc_playing_) {
-        int pos = std::max(audio_->position_ms() - 5000, 0);
-        audio_->seek(pos);
-        spirc_->seek_to(pos);
-    }
-    if ((trigger & WPAD_BUTTON_UP) && spirc_)
-        spirc_->skip(true);
-    if ((trigger & WPAD_BUTTON_DOWN) && spirc_)
-        spirc_->skip(false);
-    if ((trigger & WPAD_BUTTON_A) && spirc_) {
-        int pos = audio_->position_ms();
-        if (spirc_playing_) {
-            spirc_playing_ = false;
-            audio_->pause();
-            display_.set_progress(pos, track_dur_ms_, false);
-        } else {
-            spirc_playing_ = true;
-            audio_->resume();
-            display_.set_progress(pos, track_dur_ms_, true);
-        }
-        spirc_->notify(spirc_playing_, pos, volume_);
-    }
-    if ((trigger & WPAD_BUTTON_1) && spirc_) {
-        spirc_->toggle_shuffle();
-        display_.set_shuffle(spirc_->shuffle());
-    }
-    if ((trigger & WPAD_BUTTON_2) && spirc_) {
-        spirc_->toggle_repeat();
-        display_.set_repeat(spirc_->repeat_mode());
-    }
-}
-
-void Player::handle_pro_buttons(uint32_t trigger) {
-    if (trigger & WPAD_PRO_BUTTON_PLUS) {
-        volume_ = std::min(100, volume_ + 5);
-        audio_->set_volume(volume_);
-        display_.set_volume(volume_);
-        if (spirc_) spirc_->notify(spirc_playing_, audio_->position_ms(), volume_);
-    }
-    if (trigger & WPAD_PRO_BUTTON_MINUS) {
-        volume_ = std::max(0, volume_ - 5);
-        audio_->set_volume(volume_);
-        display_.set_volume(volume_);
-        if (spirc_) spirc_->notify(spirc_playing_, audio_->position_ms(), volume_);
-    }
-    if ((trigger & WPAD_PRO_BUTTON_R) && spirc_)
-        spirc_->skip(true);
-    if ((trigger & WPAD_PRO_BUTTON_L) && spirc_)
-        spirc_->skip(false);
-    if ((trigger & WPAD_PRO_BUTTON_ZR) && spirc_ && spirc_playing_) {
-        int pos = std::min(audio_->position_ms() + 5000, INT_MAX);
-        audio_->seek(pos);
-        spirc_->seek_to(pos);
-    }
-    if ((trigger & WPAD_PRO_BUTTON_ZL) && spirc_ && spirc_playing_) {
-        int pos = std::max(audio_->position_ms() - 5000, 0);
-        audio_->seek(pos);
-        spirc_->seek_to(pos);
-    }
-    if (trigger & WPAD_PRO_BUTTON_UP) {
-        crystal_enabled_ = true;
-        audio_->set_crystalizer(true, crystal_strength_);
-        display_.set_crystalizer(true, crystal_strength_);
-    }
-    if (trigger & WPAD_PRO_BUTTON_DOWN) {
-        crystal_enabled_ = false;
-        audio_->set_crystalizer(false, crystal_strength_);
-        display_.set_crystalizer(false, crystal_strength_);
-    }
-    if (trigger & WPAD_PRO_BUTTON_RIGHT) {
-        crystal_strength_ = std::min(25, crystal_strength_ + 1);
-        audio_->set_crystalizer(crystal_enabled_, crystal_strength_);
-        display_.set_crystalizer(crystal_enabled_, crystal_strength_);
-    }
-    if (trigger & WPAD_PRO_BUTTON_LEFT) {
-        crystal_strength_ = std::max(1, crystal_strength_ - 1);
-        audio_->set_crystalizer(crystal_enabled_, crystal_strength_);
-        display_.set_crystalizer(crystal_enabled_, crystal_strength_);
-    }
-    if (trigger & WPAD_PRO_BUTTON_B)
-        display_.toggle_controls();
-    if ((trigger & WPAD_PRO_BUTTON_STICK_R) && OLV::is_available()) {
-        std::string post_id;
-        bool has_post = false;
-        {
-            std::lock_guard<std::mutex> lk(olv_mu_);
-            if (olv_post_idx_ != SIZE_MAX && olv_post_idx_ < olv_posts_.size()) {
-                post_id  = olv_posts_[olv_post_idx_].post_id;
-                has_post = true;
-            }
-        }
-        if (has_post) OLV::open_overlay(post_id);
-    }
-    if ((trigger & WPAD_PRO_BUTTON_STICK_L) && OLV::is_available() && spirc_playing_) {
-        const std::string &post_key = isrc_.empty() ? track_id_ : isrc_;
-        OLV::open_post_applet("", track_explicit_, track_title_ + " - " + track_artist_, post_key,
-                              (uint32_t)std::max(0, audio_->position_ms()), (uint32_t)track_dur_ms_);
-    }
-    if ((trigger & WPAD_PRO_BUTTON_X) && spirc_) {
-        spirc_->toggle_shuffle();
-        display_.set_shuffle(spirc_->shuffle());
-    }
-    if ((trigger & WPAD_PRO_BUTTON_Y) && spirc_) {
-        spirc_->toggle_repeat();
-        display_.set_repeat(spirc_->repeat_mode());
-    }
-    if ((trigger & WPAD_PRO_BUTTON_A) && spirc_) {
-        int pos = audio_->position_ms();
-        if (spirc_playing_) {
-            spirc_playing_ = false;
-            audio_->pause();
-            display_.set_progress(pos, track_dur_ms_, false);
-        } else {
-            spirc_playing_ = true;
-            audio_->resume();
-            display_.set_progress(pos, track_dur_ms_, true);
-        }
-        spirc_->notify(spirc_playing_, pos, volume_);
-    }
-}
-
-// ── OLV helpers ───────────────────────────────────────────────────────────────
-
-void Player::olv_show_current() {
-    // Must be called with olv_mu_ held.
-    // olv_post_idx_ == SIZE_MAX means "timestamp mode, no post due yet".
-    if (olv_posts_.empty() || olv_post_idx_ >= olv_posts_.size()) {
-        display_.set_olv_post(nullptr);
-        return;
-    }
-    olv_shown_at_ = OSGetSystemTick();
-    const OLV::Post &p = olv_posts_[olv_post_idx_];
-    UI::Display::OLVPost dp{ p.body, p.screen_name, p.feeling, p.memo };
-    display_.set_olv_post(&dp);
-}
-
-void Player::olv_fetch(uint32_t cid) {
-    // Prefer ISRC (region-neutral) over track ID; fall back if Spotify didn't provide one.
-    std::string cur_key = isrc_.empty() ? track_id_ : isrc_;
-    if (cur_key.empty()) { olv_fetching_ = false; return; }
-    auto posts = OLV::fetch_posts(cid, 5, cur_key);
-
-    {
-        std::lock_guard<std::mutex> lk(olv_mu_);
-        if (!posts.empty()) {
-            // Stable sort by position_ms asc. Server returns posts latest-first, so
-            // ties (same timestamp) keep the latest post first — satisfying "prefer
-            // latest on time conflicts" without extra tie-breaking logic.
-            std::stable_sort(posts.begin(), posts.end(),
-                [](const OLV::Post &a, const OLV::Post &b) {
-                    return a.position_ms < b.position_ms;
-                });
-            olv_posts_    = std::move(posts);
-            // Timestamp mode: start with SIZE_MAX ("nothing due yet") so the
-            // advance loop shows the first post only when its timestamp is reached.
-            // Time-based fallback: start at 0 as usual.
-            olv_post_idx_ = (olv_posts_[0].position_ms > 0) ? SIZE_MAX : 0;
-            olv_last_advance_ = OSGetSystemTick();
-        }
-        olv_show_current();
-    }
-    olv_fetching_ = false;
-}
-
-// ── Stamp pack picker ─────────────────────────────────────────────────────────
-
-bool Player::show_stamp_pack_picker() {
-    SDL_Renderer *ren = display_.renderer();
-    TTF_Font *font_md = display_.font_medium();
-    TTF_Font *font_sm = display_.font_small();
-    if (!ren || !font_md) return true;
-
-    auto all_packs = OLV::fetch_stamp_packs();
-    if (all_packs.empty()) return true;
-
-    auto draw_text = [&](TTF_Font *f, const char *txt, SDL_Color col, int x, int y) {
-        if (!f || !txt || !*txt) return;
-        SDL_Surface *s = TTF_RenderUTF8_Blended(f, txt, col);
-        if (!s) return;
-        SDL_Texture *t = SDL_CreateTextureFromSurface(ren, s);
-        SDL_Rect r = {x, y, s->w, s->h};
-        SDL_RenderCopy(ren, t, nullptr, &r);
-        SDL_DestroyTexture(t);
-        SDL_FreeSurface(s);
-    };
-
-    SDL_Color white = {255, 255, 255, 255};
-    SDL_Color green = { 30, 215,  96, 255};
-    SDL_Color gray  = {160, 160, 160, 255};
-
-    VPADStatus    vpad{};
-    VPADReadError verr{};
-
-    auto show_msg = [&](const char *msg) {
-        SDL_SetRenderDrawColor(ren, 10, 10, 20, 255);
-        SDL_RenderClear(ren);
-        draw_text(font_md, msg, green, 100, 360);
-        SDL_RenderPresent(ren);
-    };
-
-    auto do_download = [&](const OLV::Pack &pack) -> bool {
-        while (WHBProcIsRunning()) {
-            show_msg("Downloading stamps...");
-            if (OLV::download_stamp_pack(pack) > 0) return true;
-            show_msg("Download failed — press A to retry or B to cancel.");
-            while (WHBProcIsRunning()) {
-                VPADRead(VPAD_CHAN_0, &vpad, 1, &verr);
-                if (vpad.trigger & VPAD_BUTTON_B) return false;
-                if (vpad.trigger & VPAD_BUTTON_A) break;
-                OSSleepTicks(OSMillisecondsToTicks(16));
-            }
-        }
-        return false;
-    };
-
-    // Renders a titled list of packs with a highlight bar on the selected row.
-    auto render_screen = [&](const char *title, const std::vector<OLV::Pack> &items,
-                             int sel, const char *hints) {
-        SDL_SetRenderDrawColor(ren, 10, 10, 20, 255);
-        SDL_RenderClear(ren);
-        draw_text(font_md, title, white, 100, 60);
-        if (items.empty())
-            draw_text(font_sm, "Nothing here yet.", gray, 100, 200);
-        for (int i = 0; i < (int)items.size(); ++i) {
-            int y = 150 + i * 80;
-            bool is_sel = (i == sel);
-            if (is_sel) {
-                SDL_SetRenderDrawColor(ren, 35, 35, 50, 255);
-                SDL_Rect row = {80, y - 8, 1100, 64};
-                SDL_RenderFillRect(ren, &row);
-                SDL_SetRenderDrawColor(ren, 30, 215, 96, 255);
-                SDL_Rect bar = {80, y - 8, 4, 64};
-                SDL_RenderFillRect(ren, &bar);
-            }
-            draw_text(font_md, items[i].name.c_str(), is_sel ? green : white, 100, y);
-            if (!items[i].description.empty())
-                draw_text(font_sm, items[i].description.c_str(), gray, 100, y + 32);
-            if (items[i].id != "none") {
-                int n = OLV::cached_stamp_count(items[i].id);
-                char buf[48] = {};
-                if (n > 0) snprintf(buf, sizeof(buf), "%d stamp%s", n, n == 1 ? "" : "s");
-                else        snprintf(buf, sizeof(buf), "not installed");
-                draw_text(font_sm, buf, gray, 900, y + 20);
-            }
-        }
-        draw_text(font_sm, hints, gray, 100, 660);
-        SDL_RenderPresent(ren);
-    };
-
-    // ── Stamp Store: browse and download packs not yet on SD ─────────────────
-    auto run_store = [&]() {
-        int sel = 0;
-        while (WHBProcIsRunning()) {
-            std::vector<OLV::Pack> available;
-            for (const auto &p : all_packs)
-                if (OLV::cached_stamp_count(p.id) == 0) available.push_back(p);
-            sel = std::min(sel, std::max(0, (int)available.size() - 1));
-            render_screen("Stamp Store", available, sel,
-                          "Up/Down: Navigate     A: Download     B: Back");
-            VPADRead(VPAD_CHAN_0, &vpad, 1, &verr);
-            if (vpad.trigger & VPAD_BUTTON_B) return;
-            if (vpad.trigger & VPAD_BUTTON_UP)
-                sel = (sel - 1 + std::max(1, (int)available.size())) % std::max(1, (int)available.size());
-            if (vpad.trigger & VPAD_BUTTON_DOWN)
-                sel = (sel + 1) % std::max(1, (int)available.size());
-            if ((vpad.trigger & VPAD_BUTTON_A) && !available.empty()) {
-                if (do_download(available[sel])) {
-                    show_msg("Downloaded! Press B to return.");
-                    while (WHBProcIsRunning()) {
-                        VPADRead(VPAD_CHAN_0, &vpad, 1, &verr);
-                        if (vpad.trigger & VPAD_BUTTON_B) return;
-                        OSSleepTicks(OSMillisecondsToTicks(16));
-                    }
-                }
-            }
-            OSSleepTicks(OSMillisecondsToTicks(16));
-        }
-    };
-
-    // ── Pack Manager: update or delete installed packs ────────────────────────
-    auto run_manager = [&]() {
-        int sel = 0;
-        while (WHBProcIsRunning()) {
-            std::vector<OLV::Pack> installed;
-            for (const auto &p : all_packs)
-                if (OLV::cached_stamp_count(p.id) > 0) installed.push_back(p);
-            sel = std::min(sel, std::max(0, (int)installed.size() - 1));
-            render_screen("Pack Manager", installed, sel,
-                          "Up/Down: Navigate     Y: Update     X: Delete     B: Back");
-            VPADRead(VPAD_CHAN_0, &vpad, 1, &verr);
-            if (vpad.trigger & VPAD_BUTTON_B) return;
-            if (vpad.trigger & VPAD_BUTTON_UP)
-                sel = (sel - 1 + std::max(1, (int)installed.size())) % std::max(1, (int)installed.size());
-            if (vpad.trigger & VPAD_BUTTON_DOWN)
-                sel = (sel + 1) % std::max(1, (int)installed.size());
-            if (!installed.empty()) {
-                if (vpad.trigger & VPAD_BUTTON_Y) {
-                    if (do_download(installed[sel])) {
-                        show_msg("Updated.");
-                        OSSleepTicks(OSMillisecondsToTicks(800));
-                    }
-                }
-                if (vpad.trigger & VPAD_BUTTON_X) {
-                    const std::string &pid = installed[sel].id;
-                    OLV::delete_stamp_pack(pid);
-                    if (OLV::load_selected_pack() == pid) {
-                        OLV::save_selected_pack("none");
-                        OLV::load_stamp_pack("none");
-                    }
-                    show_msg("Pack deleted.");
-                    OSSleepTicks(OSMillisecondsToTicks(800));
-                    sel = 0;
-                }
-            }
-            OSSleepTicks(OSMillisecondsToTicks(16));
-        }
-    };
-
-    // ── Main Picker: No Stamps + installed packs ──────────────────────────────
-    OLV::Pack none_pack;
-    none_pack.id = "none"; none_pack.name = "No Stamps";
-    none_pack.description = "Post without stamps";
-
-    // Restore cursor to previously selected pack.
-    int sel = 0;
-    {
-        std::string current = OLV::load_selected_pack();
-        if (current != "none") {
-            int idx = 1;
-            for (const auto &p : all_packs) {
-                if (p.id == current && OLV::cached_stamp_count(p.id) > 0) { sel = idx; break; }
-                ++idx;
-            }
-        }
-    }
-
-    while (WHBProcIsRunning()) {
-        std::vector<OLV::Pack> installed;
-        installed.push_back(none_pack);
-        for (const auto &p : all_packs)
-            if (OLV::cached_stamp_count(p.id) > 0) installed.push_back(p);
-        sel = std::min(sel, (int)installed.size() - 1);
-
-        render_screen("Select Stamp Pack", installed, sel,
-                      "Up/Down: Navigate     A: Use     +: Store     -: Manage     B: Cancel");
-        VPADRead(VPAD_CHAN_0, &vpad, 1, &verr);
-        if (vpad.trigger & VPAD_BUTTON_B) return false;
-        if (vpad.trigger & VPAD_BUTTON_UP)
-            sel = (sel - 1 + (int)installed.size()) % (int)installed.size();
-        if (vpad.trigger & VPAD_BUTTON_DOWN)
-            sel = (sel + 1) % (int)installed.size();
-        if (vpad.trigger & VPAD_BUTTON_A) {
-            OLV::load_stamp_pack(installed[sel].id);
-            OLV::save_selected_pack(installed[sel].id);
-            return true;
-        }
-        if (vpad.trigger & VPAD_BUTTON_PLUS)  run_store();
-        if (vpad.trigger & VPAD_BUTTON_MINUS) run_manager();
-        OSSleepTicks(OSMillisecondsToTicks(16));
-    }
-    return false;
 }
 
 } // namespace Connect

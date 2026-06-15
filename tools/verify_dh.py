@@ -105,7 +105,7 @@ WIIU_SHANNON = bytes.fromhex("4B6CA3FBC1ACCCE4")
 print(f"Shannon self-test expected: {shn_out.hex().upper()}")
 print(f"Shannon self-test Wii U:    {WIIU_SHANNON.hex().upper()}")
 shannon_ok = (shn_out == WIIU_SHANNON)
-print(f"Shannon match: {'YES ✓' if shannon_ok else 'NO ✗ — cipher bug!'}")
+print(f"Shannon match: {'YES ✓' if shannon_ok else 'NO ✗ -- cipher bug!'}")
 print()
 
 # ── Test 2: DH shared secret ──────────────────────────────────────────────────
@@ -117,16 +117,16 @@ shared_expected = shared_int.to_bytes(96, 'big').lstrip(b'\x00')
 print(f"DH shared expected[0..7]:  {shared_expected[:8].hex().upper()}")
 print(f"DH shared Wii U[0..7]:     {wiiu_shared[:8].hex().upper()}")
 dh_ok = (shared_expected == wiiu_shared.lstrip(b'\x00'))
-print(f"DH match: {'YES ✓' if dh_ok else 'NO ✗ — exp_mod bug on PPC!'}")
+print(f"DH match: {'YES ✓' if dh_ok else 'NO ✗ -- exp_mod bug on PPC!'}")
 print()
 
-# ── Test 3: HMAC key derivation (needs ap_raw — skip if not available) ────────
+# ── Test 3: HMAC key derivation (needs ap_raw -- skip if not available) ────────
 if dh_ok and shannon_ok:
-    print("DH and Shannon both correct — bug is in HMAC inputs.")
+    print("DH and Shannon both correct -- bug is in HMAC inputs.")
     print("Need full ap_raw (464 bytes) to verify. Add ap_raw logging.")
 elif dh_ok and not shannon_ok:
-    print("DH correct, Shannon wrong — fix the Shannon cipher implementation.")
+    print("DH correct, Shannon wrong -- fix the Shannon cipher implementation.")
 elif not dh_ok:
-    print("DH wrong — mbedtls_mpi_exp_mod gives wrong result on PPC!")
+    print("DH wrong -- mbedtls_mpi_exp_mod gives wrong result on PPC!")
     print(f"Expected first 8: {shared_expected[:8].hex().upper()}")
     print(f"Got from Wii U:   {wiiu_shared[:8].hex().upper()}")

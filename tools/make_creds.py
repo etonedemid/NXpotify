@@ -2,7 +2,7 @@
 """
 Convert a librespot credentials.json to the binary format read by spotify-wii-u.
 
-Step 1 — get librespot
+Step 1 -- get librespot
 ----------------------
   Prebuilt binaries (Windows, Linux, macOS) are available as a release in this repo:
     https://github.com/Happynico7504/spotify-wiiu/releases/tag/librespot-tools
@@ -12,7 +12,7 @@ Step 1 — get librespot
     Linux (packaged): sudo apt install librespot
                    or sudo pacman -S librespot
 
-Step 2 — authenticate once and save credentials
+Step 2 -- authenticate once and save credentials
 ------------------------------------------------
   Windows (PowerShell / cmd):
     librespot.exe --name "wii-u-setup" --cache %TEMP%\\librespot-cache
@@ -27,9 +27,9 @@ Step 2 — authenticate once and save credentials
   librespot will appear as a Spotify Connect device called "wii-u-setup".
   Open any Spotify app, select it as your playback device, and librespot will
   authenticate automatically. Kill it with Ctrl+C once it prints
-  "Authenticated as ..."  (audio output errors are harmless — ignore them).
+  "Authenticated as ..."  (audio output errors are harmless -- ignore them).
 
-Step 3 — convert
+Step 3 -- convert
 ----------------
   Windows:
     python tools\\make_creds.py %TEMP%\\librespot-cache\\credentials.json
@@ -37,7 +37,7 @@ Step 3 — convert
   Linux:
     python3 tools/make_creds.py /tmp/librespot-cache/credentials.json
 
-Step 4 — copy to SD card
+Step 4 -- copy to SD card
 ------------------------
   Copy the resulting spotify_saved_creds.bin to the root of the Wii U SD card.
   The homebrew picks it up automatically on the next Spotify Connect.
