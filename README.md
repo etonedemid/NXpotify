@@ -1,6 +1,7 @@
 # NXpotify
 
 An unofficial [Spotify Connect](https://www.spotify.com/connect/) client for the Nintendo Switch.
+Based on https://github.com/Happynico7504/spotify-wiiu
 
 > **Requires a Spotify Premium account.**
 > Not affiliated with or endorsed by Spotify AB.
