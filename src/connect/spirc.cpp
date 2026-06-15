@@ -9,10 +9,11 @@
 #include <thread>
 
 #include <curl/curl.h>
+#include "platform.h"
 #include <mbedtls/sha1.h>
-#include <whb/log.h>
-#include <coreinit/thread.h>
-#include <coreinit/time.h>
+
+
+
 #include "cJSON/cJSON.h"
 
 namespace Connect {
@@ -355,62 +356,66 @@ bool Spirc::start(Callbacks cb) {
 
     started_.store(true);
     send_hello();
-    WHBLogPrintf("spirc: started, sub=%s", user_uri.c_str());
+    PLAT_LOGF("spirc: started, sub=%s", user_uri.c_str());
 
     // Start Dealer WebSocket in background.
-    // Resolve the spclient first so the dealer is in the SAME cluster — Spotify's
+    // Resolve the spclient first so the dealer is in the SAME cluster -- Spotify's
     // spclient does a local-only lookup for Dealer sessions, so a cross-cluster
     // mismatch causes HTTP 404 on every PutStateRequest.
-    dealer_init_thread_ = std::thread([this]() {
-        OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-        std::string atk;
-        { std::lock_guard<std::mutex> lk(token_mu_); atk = access_token_; }
-        if (atk.empty()) {
-            atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
-            if (atk.empty()) { WHBLogPrint("dealer: no access token"); return; }
-            std::lock_guard<std::mutex> lk(token_mu_);
-            access_token_ = atk;
-        }
-        if (!started_.load()) return;
-
-        // Resolve spclient and cache it (saves a second resolve in put_connect_state_sync).
-        std::string sp = resolve_spclient_host();
-        { std::lock_guard<std::mutex> lk(spclient_mu_); if (spclient_host_.empty()) spclient_host_ = sp; }
-
-        // Derive dealer host from spclient host by replacing "-spclient." with "-dealer.".
-        // e.g.  gew4-spclient.spotify.com  →  gew4-dealer.spotify.com
-        std::string dealer_host = "dealer.spotify.com";   // fallback
-        {
-            const std::string from = "-spclient.";
-            const std::string to   = "-dealer.";
-            auto p = sp.find(from);
-            if (p != std::string::npos) dealer_host = sp.substr(0, p) + to + sp.substr(p + from.size());
-        }
-        WHBLogPrintf("spirc: dealer host: %s", dealer_host.c_str());
-
-        std::string ws_url = "wss://" + dealer_host + "/?access_token=" + atk;
-        dealer_.start(ws_url,
-            [this](const std::string &cid) {
-                { std::lock_guard<std::mutex> lk(conn_mu_); connection_id_ = cid; }
-                WHBLogPrintf("spirc: dealer connection_id ready (%zu chars)", cid.size());
-                if (started_.load())
-                    put_connect_state_async(1 /* SPIRC_HELLO */, playing_, pos_ms_, vol_pct_);
-            },
-            [this](const std::string &uri, const std::vector<uint8_t> &payload) {
-                handle_dealer_message(uri, payload);
-            },
-            [this](const std::string &ident, const std::string &cmd_json) {
-                return handle_dealer_request(ident, cmd_json);
-            });
-    });
-
+    // TLS + WebSocket in this thread need more stack than std::thread default.
+    pthread_attr_t _da; pthread_attr_init(&_da); pthread_attr_setstacksize(&_da, 1024*1024);
+    pthread_create(&dealer_init_pth_, &_da, [](void *arg) -> void* {
+        reinterpret_cast<Spirc*>(arg)->dealer_init_(); return nullptr;
+    }, this);
+    pthread_attr_destroy(&_da);
     return true;
+}
+
+void Spirc::dealer_init_() {
+    std::string atk;
+    { std::lock_guard<std::mutex> lk(token_mu_); atk = access_token_; }
+    if (atk.empty()) {
+        atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
+        if (atk.empty()) { PLAT_LOG("dealer: no access token"); return; }
+        std::lock_guard<std::mutex> lk(token_mu_);
+        access_token_ = atk;
+    }
+    if (!started_.load()) return;
+
+    // Resolve spclient and cache it (saves a second resolve in put_connect_state_sync).
+    std::string sp = resolve_spclient_host();
+    { std::lock_guard<std::mutex> lk(spclient_mu_); if (spclient_host_.empty()) spclient_host_ = sp; }
+
+    // Derive dealer host from spclient host by replacing "-spclient." with "-dealer.".
+    std::string dealer_host = "dealer.spotify.com";   // fallback
+    {
+        const std::string from = "-spclient.";
+        const std::string to   = "-dealer.";
+        auto p = sp.find(from);
+        if (p != std::string::npos) dealer_host = sp.substr(0, p) + to + sp.substr(p + from.size());
+    }
+    PLAT_LOGF("spirc: dealer host: %s", dealer_host.c_str());
+
+    std::string ws_url = "wss://" + dealer_host + "/?access_token=" + atk;
+    dealer_.start(ws_url,
+        [this](const std::string &cid) {
+            { std::lock_guard<std::mutex> lk(conn_mu_); connection_id_ = cid; }
+            PLAT_LOGF("spirc: dealer connection_id ready (%zu chars)", cid.size());
+            if (started_.load())
+                put_connect_state_async(1 /* SPIRC_HELLO */, playing_, pos_ms_, vol_pct_);
+        },
+        [this](const std::string &uri, const std::vector<uint8_t> &payload) {
+            handle_dealer_message(uri, payload);
+        },
+        [this](const std::string &ident, const std::string &cmd_json) {
+            return handle_dealer_request(ident, cmd_json);
+        });
 }
 
 void Spirc::stop() {
     if (!started_.exchange(false)) return;
     dealer_.stop();
-    if (dealer_init_thread_.joinable()) dealer_init_thread_.join();
+    if (dealer_init_pth_) { pthread_join(dealer_init_pth_, nullptr); dealer_init_pth_ = 0; }
     // Send Goodbye frame
     std::string user_uri = "hm://remote/3/user/" + username_ + "/";
     auto frame = build_frame(MsgType::Goodbye, false, 0, vol_pct_);
@@ -542,7 +547,7 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
     // Resolve the context URI to send.  Prefer the stored context if it is a
     // type the connect-state API accepts.  Fall back to the current track URI
     // so we never send is_active=true with an absent context_uri (HTTP 500).
-    // "spotify:user:..." URIs cause INVALID_ENTITY (400) — omit them entirely.
+    // "spotify:user:..." URIs cause INVALID_ENTITY (400) -- omit them entirely.
     std::string ctx_uri;
     if (!context_uri_.empty() &&
         (context_uri_.compare(0, 17, "spotify:playlist:") == 0 ||
@@ -573,9 +578,9 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
     // ProvidedTrack field numbers (player.proto): uri=1 uid=2 metadata=3 provider=6
     // metadata map entries use MapEntry encoding: key=1, value=2 inside a LEN field.
     // Required metadata keys (from librespot state/metadata.rs):
-    //   "context_uri"   — the enclosing playlist / album URI
-    //   "entity_uri"    — same as context_uri for regular context tracks
-    //   "context_index" — absolute zero-based position in the context as a decimal string
+    //   "context_uri"   -- the enclosing playlist / album URI
+    //   "entity_uri"    -- same as context_uri for regular context tracks
+    //   "context_index" -- absolute zero-based position in the context as a decimal string
     auto make_ctx_track = [&](int idx) -> std::vector<uint8_t> {
         std::vector<uint8_t> tr;
         pb_str(tr, 1, track_uris_[idx]);
@@ -610,7 +615,7 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
 
     // next_tracks (field 9): up to 80 tracks after the current one (librespot limit).
     // With repeat_context, wraps around the playlist inserting a "spotify:delimiter"
-    // sentinel between iterations — mirrors librespot's fill_up_next_tracks().
+    // sentinel between iterations -- mirrors librespot's fill_up_next_tracks().
     {
         int n      = (int)track_uris_.size();
         int filled = 0;
@@ -647,7 +652,7 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
             k++;
         }
     }
-    WHBLogPrintf("spirc: ps ctx='%.40s' uri='%.40s' idx=%u dur=%lld play=%d pos=%d",
+    PLAT_LOGF("spirc: ps ctx='%.40s' uri='%.40s' idx=%u dur=%lld play=%d pos=%d",
                  ctx_uri.c_str(), track_uri_for_ps.c_str(),
                  (unsigned)playing_track_idx_, (long long)duration_ms_, (int)playing, pos_ms);
     pb_i64(ps, 10, (int64_t)(pos_ms > 0 ? pos_ms : 0));         // position_as_of_timestamp
@@ -682,7 +687,7 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
 std::vector<uint8_t> Spirc::build_device_info_cs(int vol_pct) {
     uint32_t vol = (uint32_t)(vol_pct * 655);  // 0-100 → 0-65535
 
-    // Capabilities — field numbers from connect.proto (Spotify 1.2.52.442 / librespot 0.8.0)
+    // Capabilities -- field numbers from connect.proto (Spotify 1.2.52.442 / librespot 0.8.0)
     // connect.proto Capabilities message: fields 1, 4, 24 are reserved.
     std::vector<uint8_t> caps;
     pb_bool(caps,  2, true);   // can_be_player
@@ -697,7 +702,7 @@ std::vector<uint8_t> Spirc::build_device_info_cs(int vol_pct) {
     pb_bool(caps, 22, true);   // needs_full_player_state
     pb_bool(caps, 25, true);   // supports_set_options_command (shuffle/repeat/volume)
 
-    // DeviceInfo — field numbers from connect.proto
+    // DeviceInfo -- field numbers from connect.proto
     std::vector<uint8_t> di;
     pb_bool(di, 1,  true);           // can_play
     pb_u32 (di, 2,  vol);            // volume
@@ -713,8 +718,8 @@ std::vector<uint8_t> Spirc::build_device_info_cs(int vol_pct) {
 
 // ── PutStateRequest ───────────────────────────────────────────────────────────
 
-static int64_t now_ms_wiiu() {
-    return (int64_t)(OSGetSystemTick() / OSMillisecondsToTicks(1));
+static int64_t now_ms_spirc() {
+    return plat_now_ms();
 }
 
 void Spirc::goodbye() {
@@ -740,7 +745,7 @@ void Spirc::goodbye() {
 
 void Spirc::become_inactive() {
     if (!started_.load()) return;
-    WHBLogPrint("spirc: become_inactive — AP dropped externally");
+    PLAT_LOG("spirc: become_inactive -- AP dropped externally");
     inactive_.store(true);
     saw_inactive_cluster_.store(false);
     playing_ = false;
@@ -753,17 +758,17 @@ void Spirc::become_inactive() {
 
 void Spirc::put_connect_state_async(uint32_t reason, bool playing, int pos_ms, int vol_pct) {
     // At most one PUT inflight at a time.  If one is already running, mark dirty
-    // and return — the inflight thread will fire a follow-up when it finishes.
+    // and return -- the inflight thread will fire a follow-up when it finishes.
     int expected = 0;
     if (!push_inflight_.compare_exchange_strong(expected, 1)) {
         dirty_push_.store(true);
         return;
     }
 
-    // We own the slot — build proto from current state and fire.
-    // Throttle tracking uses boot-relative ms (OSGetSystemTick); proto timestamps
+    // We own the slot -- build proto from current state and fire.
+    // Throttle tracking uses boot-relative ms; proto timestamps
     // use Unix ms from time() which is 0 on Wii U but was accepted by Spotify before.
-    int64_t throttle_ms = now_ms_wiiu();
+    int64_t throttle_ms = now_ms_spirc();
     int64_t proto_ms    = (int64_t)time(nullptr) * 1000;
     int64_t sat         = started_playing_at_ms_;
 
@@ -780,16 +785,23 @@ void Spirc::put_connect_state_async(uint32_t reason, bool playing, int pos_ms, i
     pb_i64 (psr, 12, proto_ms);
 
     last_state_push_ms_ = throttle_ms;
-    std::thread([this, psr = std::move(psr), reason, playing]() mutable {
-        OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-        put_connect_state_sync(std::move(psr), reason, playing);
-        push_inflight_.store(0);
-        // Always follow up if state changed while inflight, regardless of HTTP result.
-        // Dropping dirty on error caused shuffle/repeat commands to snap back permanently
-        // because the correction PUT was never sent when the periodic push got 5xx.
-        if (dirty_push_.exchange(false))
-            put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
-    }).detach();
+    // put_connect_state_sync does HTTPS (TLS) -- needs > default thread stack on Switch.
+    struct PutArg { Spirc *self; std::vector<uint8_t> psr; uint32_t reason; bool playing; };
+    auto *arg = new PutArg{this, std::move(psr), reason, playing};
+    pthread_t pth; pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1024 * 1024);
+    pthread_create(&pth, &attr, [](void *vp) -> void* {
+        auto *a = static_cast<PutArg*>(vp);
+        a->self->put_connect_state_sync(std::move(a->psr), a->reason, a->playing);
+        a->self->push_inflight_.store(0);
+        if (a->self->dirty_push_.exchange(false))
+            a->self->put_connect_state_async(4, a->self->playing_, a->self->pos_ms_, a->self->vol_pct_);
+        delete a;
+        return nullptr;
+    }, arg);
+    pthread_attr_destroy(&attr);
+    pthread_detach(pth);
 }
 
 long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bool playing) {
@@ -801,7 +813,7 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
     { std::lock_guard<std::mutex> lk(token_mu_); atk = access_token_; }
     if (atk.empty()) {
         atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
-        if (atk.empty()) { WHBLogPrint("spirc: put_cs: no token"); return 0; }
+        if (atk.empty()) { PLAT_LOG("spirc: put_cs: no token"); return 0; }
         std::lock_guard<std::mutex> lk(token_mu_);
         access_token_ = atk;
     }
@@ -816,7 +828,7 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
         host = spclient_host_;
     }
 
-    // PUT /connect-state/v1/devices/{device_id} — same namespace as /devices/helo.
+    // PUT /connect-state/v1/devices/{device_id} -- same namespace as /devices/helo.
     // The Dealer connection_id goes in X-Spotify-Connection-Id for cluster routing.
     std::string path     = "/connect-state/v1/devices/" + device_id_;
     std::string url      = "https://" + host + path;
@@ -847,7 +859,7 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
             curl_easy_perform(hc);
             long hc_code = 0; curl_easy_getinfo(hc, CURLINFO_RESPONSE_CODE, &hc_code);
             curl_slist_free_all(hh); curl_easy_cleanup(hc);
-            WHBLogPrintf("spirc: helo → HTTP %ld", hc_code);
+            PLAT_LOGF("spirc: helo → HTTP %ld", hc_code);
         }
     }
 
@@ -871,20 +883,20 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
 
     if (reason != 1 /* SPIRC_HELLO */ && !helo_done_.load()) {
         curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
-        WHBLogPrint("spirc: put_cs skipped — helo not done yet");
+        PLAT_LOG("spirc: put_cs skipped -- helo not done yet");
         return 0;
     }
 
     curl_easy_perform(curl);
     long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
-    WHBLogPrintf("spirc: put_cs reason=%u playing=%d → HTTP %ld", reason, (int)playing, code);
+    PLAT_LOGF("spirc: put_cs reason=%u playing=%d → HTTP %ld", reason, (int)playing, code);
 
     // Expired token → evict so the next call will re-fetch
     if (code == 401) {
         std::lock_guard<std::mutex> lk(token_mu_);
         access_token_.clear();
-        WHBLogPrint("spirc: put_cs 401 — token evicted");
+        PLAT_LOG("spirc: put_cs 401 -- token evicted");
     }
 
     if (reason == 1 /* SPIRC_HELLO */ && (code == 200 || code == 204)) {
@@ -911,9 +923,9 @@ void Spirc::handle_dealer_message(const std::string &uri,
         while (rd.next(f, w)) {
             if (f == 1 && w == 0) {
                 uint64_t v; rd.vi(v);
-                int raw = (int)v;  // 0–65535
+                int raw = (int)v;  // 0-65535
                 int pct = (int)((uint64_t)raw * 100 / 65535);
-                WHBLogPrintf("spirc: volume cmd %d (%d%%)", raw, pct);
+                PLAT_LOGF("spirc: volume cmd %d (%d%%)", raw, pct);
                 vol_pct_ = pct;
                 if (callbacks_.on_volume) callbacks_.on_volume(pct);
                 put_connect_state_async(5 /* VOLUME_CHANGED */, playing_, pos_ms_, pct);
@@ -926,14 +938,14 @@ void Spirc::handle_dealer_message(const std::string &uri,
     if (uri.compare(0, sizeof(CLUSTER) - 1, CLUSTER) != 0) return;
 
     ClusterState cs = parse_cluster_update(payload);
-    WHBLogPrintf("spirc: cluster upd has_cluster=%d active='%.40s' playing=%d",
+    PLAT_LOGF("spirc: cluster upd has_cluster=%d active='%.40s' playing=%d",
                  (int)cs.has_cluster, cs.active_device_id.c_str(), (int)cs.is_playing);
-    WHBLogPrintf("spirc: cluster upd ours='%.40s'", device_id_.c_str());
+    PLAT_LOGF("spirc: cluster upd ours='%.40s'", device_id_.c_str());
 
     // No cluster sub-message: librespot treats this as became_inactive when active.
     if (!cs.has_cluster) {
         if (playing_ || !current_track_uri_.empty()) {
-            WHBLogPrint("spirc: no-cluster update while active — became inactive");
+            PLAT_LOG("spirc: no-cluster update while active -- became inactive");
             playing_ = false;
             current_track_uri_.clear();
             if (callbacks_.on_became_inactive) callbacks_.on_became_inactive();
@@ -944,7 +956,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
     // active_device_id empty = no device is currently active.
     // active_device_id != ours = another device took over.
     if (cs.active_device_id != device_id_) {
-        WHBLogPrintf("spirc: became inactive (active='%.40s')",
+        PLAT_LOGF("spirc: became inactive (active='%.40s')",
                      cs.active_device_id.c_str());
 
         // active='' playing=1 is always a stale echo from our own put_cs(playing=false).
@@ -952,7 +964,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
         // Ignore all active='' playing=1 to avoid the feedback loop:
         //   became_inactive → put_cs(playing=0) → echo(active='') → became_inactive → …
         if (cs.active_device_id.empty() && cs.is_playing) {
-            WHBLogPrint("spirc: cluster active='' playing=1 — stale echo, ignoring");
+            PLAT_LOG("spirc: cluster active='' playing=1 -- stale echo, ignoring");
             return;
         }
 
@@ -961,7 +973,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
             current_track_uri_.clear();
             // Reset so any lingering echoes are caught by the active='' playing=1 guard above.
             started_playing_at_ms_ = 0;
-            // Don't send put_cs — Spotify already knows we're inactive (it told us), and
+            // Don't send put_cs -- Spotify already knows we're inactive (it told us), and
             // sending one would generate another cluster echo, restarting the loop.
             if (callbacks_.on_became_inactive) callbacks_.on_became_inactive();
         }
@@ -975,13 +987,13 @@ void Spirc::handle_dealer_message(const std::string &uri,
     if (inactive_.load()) {
         if (!saw_inactive_cluster_.load()) {
             // inactive_ just set; stale echo of our pre-drop put_cs(playing=1).
-            // Spotify hasn't yet confirmed the other device is active — ignore.
-            WHBLogPrint("spirc: cluster active=ours while inactive (stale echo) — ignoring");
+            // Spotify hasn't yet confirmed the other device is active -- ignore.
+            PLAT_LOG("spirc: cluster active=ours while inactive (stale echo) -- ignoring");
             return;
         }
         // Spotify previously told us another device was active, now routes back to us:
         // the user explicitly re-selected this device. Clear inactive and proceed.
-        WHBLogPrint("spirc: cluster active=ours — re-activating after inactive");
+        PLAT_LOG("spirc: cluster active=ours -- re-activating after inactive");
         inactive_.store(false);
         saw_inactive_cluster_.store(false);
     }
@@ -996,12 +1008,12 @@ void Spirc::handle_dealer_message(const std::string &uri,
             && started_playing_at_ms_ > 0) {
         if (local_pause_pending_.exchange(false)) {
             // Stale cluster echo from an in-flight PUT that landed before our pause
-            // PUT — re-assert paused state and ignore the resume signal.
-            WHBLogPrint("spirc: cluster resume suppressed (local pause pending)");
+            // PUT -- re-assert paused state and ignore the resume signal.
+            PLAT_LOG("spirc: cluster resume suppressed (local pause pending)");
             put_connect_state_async(4, false, pos_ms_, vol_pct_);
             return;
         }
-        WHBLogPrintf("spirc: cluster resume @%ldms", (long)cs.position_ms);
+        PLAT_LOGF("spirc: cluster resume @%ldms", (long)cs.position_ms);
         playing_ = true;
         pos_ms_  = (int)cs.position_ms;
         if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(true, pos_ms_);
@@ -1013,7 +1025,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
     if (cs.track_uri == current_track_uri_ && (playing_ || !cs.is_playing)) {
         if (!cs.is_playing) local_pause_pending_.store(false);  // cluster confirmed paused
         // Periodic keepalive PUT if we haven't pushed recently.
-        int64_t now_ms = now_ms_wiiu();
+        int64_t now_ms = now_ms_spirc();
         if (helo_done_.load() && now_ms - last_state_push_ms_ >= 30000)
             put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
         return;
@@ -1022,12 +1034,12 @@ void Spirc::handle_dealer_message(const std::string &uri,
     // This drops echoes of PUT(old_track) that complete after we already switched:
     // those echoes have cs.track_uri == old_track != current_track_uri_.
     if (!current_track_uri_.empty() && cs.track_uri != current_track_uri_ && playing_) {
-        WHBLogPrintf("spirc: cluster drop stale echo '%s' (current='%s')",
+        PLAT_LOGF("spirc: cluster drop stale echo '%s' (current='%s')",
                      cs.track_uri.c_str(), current_track_uri_.c_str());
         return;
     }
 
-    WHBLogPrintf("spirc: dealer → load '%s' @%ldms",
+    PLAT_LOGF("spirc: dealer → load '%s' @%ldms",
                  cs.track_uri.c_str(), (long)cs.position_ms);
 
     // Derive GID from the base-62 track ID in the URI (spotify:track:<base62>)
@@ -1042,7 +1054,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
     if (callbacks_.on_play) callbacks_.on_play(cs.track_uri, pos);
 
     // If the new track is already in our loaded full context, just advance the
-    // index — no Mercury context-resolve needed.  This avoids saturating the AP
+    // index -- no Mercury context-resolve needed.  This avoids saturating the AP
     // connection with a full playlist response on every auto-advance.
     bool same_context   = (context_uri_ == cs.context_uri) && !context_uri_.empty();
     bool need_ctx_fetch = true;
@@ -1057,7 +1069,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
                                  ? cs.context_index_track : (uint32_t)k;
                 if (gid.size() == 16 && k < track_gids_.size())
                     track_gids_[k] = gid;
-                WHBLogPrintf("spirc: cluster advance in-ctx idx=%zu abs=%u",
+                PLAT_LOGF("spirc: cluster advance in-ctx idx=%zu abs=%u",
                              k, abs_track_idx_);
                 need_ctx_fetch = false;
                 break;
@@ -1086,7 +1098,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
         playing_track_idx_ = (uint32_t)cur_idx;
         abs_track_idx_ = (cs.context_index_track != UINT32_MAX)
                          ? cs.context_index_track : (uint32_t)cur_idx;
-        WHBLogPrintf("spirc: cluster list=%zu prev=%zu next=%zu cur=%zu abs=%u",
+        PLAT_LOGF("spirc: cluster list=%zu prev=%zu next=%zu cur=%zu abs=%u",
                      all_uris.size(), cs.prev_uris.size(), cs.next_uris.size(),
                      cur_idx, abs_track_idx_);
     }
@@ -1109,10 +1121,10 @@ void Spirc::handle_dealer_message(const std::string &uri,
 
 bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
                                    const std::string &cmd_json) {
-    WHBLogPrintf("spirc: cmd-raw=%.250s", cmd_json.c_str());
+    PLAT_LOGF("spirc: cmd-raw=%.250s", cmd_json.c_str());
     cJSON *root = cJSON_Parse(cmd_json.c_str());
     if (!root) {
-        WHBLogPrint("spirc: cmd: JSON parse failed");
+        PLAT_LOG("spirc: cmd: JSON parse failed");
         return false;
     }
 
@@ -1128,18 +1140,18 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         return false;
     }
     const char *ep = ep_j->valuestring;
-    WHBLogPrintf("spirc: cmd endpoint='%s'", ep);
+    PLAT_LOGF("spirc: cmd endpoint='%s'", ep);
 
-    // AP dropped externally (device switch) — reject most commands to avoid driving
+    // AP dropped externally (device switch) -- reject most commands to avoid driving
     // put_cs(playing=1) over HTTP and kicking off another activation loop.
     // Exception: "transfer" is an explicit user selection and always clears inactive_.
     if (inactive_.load()) {
         if (strcmp(ep, "transfer") != 0) {
-            WHBLogPrint("spirc: rejecting cmd (inactive after AP drop)");
+            PLAT_LOG("spirc: rejecting cmd (inactive after AP drop)");
             cJSON_Delete(root);
             return false;
         }
-        WHBLogPrint("spirc: transfer while inactive — re-activating");
+        PLAT_LOG("spirc: transfer while inactive -- re-activating");
         inactive_.store(false);
         saw_inactive_cluster_.store(false);
     }
@@ -1163,7 +1175,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         cJSON *val_j = cJSON_GetObjectItem(cmd_obj, "value");
         if (!val_j) val_j = cJSON_GetObjectItem(cmd_obj, "position");
         int pos = val_j ? (int)val_j->valuedouble : pos_ms_;
-        WHBLogPrintf("spirc: seek_to %d ms", pos);
+        PLAT_LOGF("spirc: seek_to %d ms", pos);
         pos_ms_ = pos;
         if (callbacks_.on_seek) callbacks_.on_seek(pos);
         put_connect_state_async(4, playing_, pos, vol_pct_);
@@ -1181,7 +1193,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
     } else if (strcmp(ep, "transfer") == 0) {
         cJSON *data_j = cJSON_GetObjectItem(cmd_obj, "data");
         if (!cJSON_IsString(data_j)) {
-            WHBLogPrint("spirc: transfer: missing data");
+            PLAT_LOG("spirc: transfer: missing data");
             cJSON_Delete(root);
             return false;
         }
@@ -1224,11 +1236,11 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         if (ts.uri.empty() && ts.gid.size() == 16)
             ts.uri = "spotify:track:" + gid_to_base62(ts.gid);
         if (ts.uri.empty()) {
-            WHBLogPrint("spirc: transfer: no track URI");
+            PLAT_LOG("spirc: transfer: no track URI");
             cJSON_Delete(root);
             return false;
         }
-        WHBLogPrintf("spirc: transfer track='%.40s' pos=%d paused=%d ctx='%.30s'",
+        PLAT_LOGF("spirc: transfer track='%.40s' pos=%d paused=%d ctx='%.30s'",
                      ts.uri.c_str(), ts.pos, (int)ts.paused, ts.ctx.c_str());
 
         context_uri_       = ts.ctx;
@@ -1294,7 +1306,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
                         else if (f == 3) override_repeat_track = v ? 1 : 0;
                     } else rd.skip(w);
                 }
-                WHBLogPrintf("spirc: play player_options_override sh=%d rpt=%d rpt1=%d",
+                PLAT_LOGF("spirc: play player_options_override sh=%d rpt=%d rpt1=%d",
                              override_shuffle, override_repeat, override_repeat_track);
             }
         }
@@ -1333,7 +1345,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         }
 
         if (target_uri.empty()) {
-            WHBLogPrint("spirc: play: no target URI");
+            PLAT_LOG("spirc: play: no target URI");
             cJSON_Delete(root);
             return false;
         }
@@ -1342,7 +1354,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         if (target_uri.size() > 14 && target_uri.compare(0, 14, "spotify:track:") == 0)
             gid = base62_to_gid(target_uri.c_str() + 14, target_uri.size() - 14);
 
-        WHBLogPrintf("spirc: play track='%.40s' idx=%d pos=%d ctx='%.30s'",
+        PLAT_LOGF("spirc: play track='%.40s' idx=%d pos=%d ctx='%.30s'",
                      target_uri.c_str(), target_idx, seek_to, ctx_uri.c_str());
 
         context_uri_       = ctx_uri;
@@ -1384,7 +1396,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         if (cJSON_IsBool(sh)) shuffle_      = cJSON_IsTrue(sh);
         if (cJSON_IsBool(rc)) repeat_       = cJSON_IsTrue(rc);
         if (cJSON_IsBool(rt)) repeat_track_ = cJSON_IsTrue(rt);
-        WHBLogPrintf("spirc: set_options shuffle=%d repeat_ctx=%d repeat_track=%d",
+        PLAT_LOGF("spirc: set_options shuffle=%d repeat_ctx=%d repeat_track=%d",
                      (int)shuffle_, (int)repeat_, (int)repeat_track_);
         if (callbacks_.on_options_changed) callbacks_.on_options_changed(shuffle_, repeat_mode());
         put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
@@ -1393,30 +1405,30 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
     } else if (strcmp(ep, "set_shuffling_context") == 0) {
         cJSON *v = cJSON_GetObjectItem(cmd_obj, "value");
         if (cJSON_IsBool(v)) shuffle_ = cJSON_IsTrue(v);
-        WHBLogPrintf("spirc: set_shuffling_context=%d", (int)shuffle_);
+        PLAT_LOGF("spirc: set_shuffling_context=%d", (int)shuffle_);
         if (callbacks_.on_options_changed) callbacks_.on_options_changed(shuffle_, repeat_mode());
         put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 
     } else if (strcmp(ep, "set_repeating_context") == 0) {
         cJSON *v = cJSON_GetObjectItem(cmd_obj, "value");
         if (cJSON_IsBool(v)) repeat_ = cJSON_IsTrue(v);
-        WHBLogPrintf("spirc: set_repeating_context=%d", (int)repeat_);
+        PLAT_LOGF("spirc: set_repeating_context=%d", (int)repeat_);
         if (callbacks_.on_options_changed) callbacks_.on_options_changed(shuffle_, repeat_mode());
         put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 
     } else if (strcmp(ep, "set_repeating_track") == 0) {
         cJSON *v = cJSON_GetObjectItem(cmd_obj, "value");
         if (cJSON_IsBool(v)) repeat_track_ = cJSON_IsTrue(v);
-        WHBLogPrintf("spirc: set_repeating_track=%d", (int)repeat_track_);
+        PLAT_LOGF("spirc: set_repeating_track=%d", (int)repeat_track_);
         if (callbacks_.on_options_changed) callbacks_.on_options_changed(shuffle_, repeat_mode());
         put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 
     // ── set_volume ────────────────────────────────────────────────────────────
     } else if (strcmp(ep, "set_volume") == 0) {
         cJSON *vol_j = cJSON_GetObjectItem(cmd_obj, "volume");
-        WHBLogPrintf("spirc: set_volume vol_found=%d", vol_j!=nullptr);
+        PLAT_LOGF("spirc: set_volume vol_found=%d", vol_j!=nullptr);
         if (cJSON_IsNumber(vol_j)) {
-            int raw = (int)vol_j->valuedouble;  // 0–65535
+            int raw = (int)vol_j->valuedouble;  // 0-65535
             int pct = (int)((uint64_t)raw * 100 / 65535);
             vol_pct_ = pct;
             if (callbacks_.on_volume) callbacks_.on_volume(pct);
@@ -1424,7 +1436,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         }
 
     } else {
-        WHBLogPrintf("spirc: cmd unknown endpoint '%s'", ep);
+        PLAT_LOGF("spirc: cmd unknown endpoint '%s'", ep);
         cJSON_Delete(root);
         return false;
     }
@@ -1447,7 +1459,7 @@ std::vector<uint8_t> Spirc::build_frame(uint32_t msg_type, bool playing,
     pb_u32(state, 4, (uint32_t)(pos_ms > 0 ? pos_ms : 0));
     pb_u32(state, 5, playing ? 1u : 2u);
     pb_u32(state, 26, playing_track_idx_);
-    // Only echo the currently playing track — the full list can be 5-6 KB and
+    // Only echo the currently playing track -- the full list can be 5-6 KB and
     // Mercury drops oversized messages silently. The controller already has the list.
     {
         size_t i = playing_track_idx_;
@@ -1493,13 +1505,13 @@ void Spirc::notify(bool playing, int pos_ms, int vol_pct) {
     playing_ = playing; pos_ms_ = pos_ms; vol_pct_ = vol_pct;
     if (playing_changed && callbacks_.on_playing_changed)
         callbacks_.on_playing_changed(playing, pos_ms);
-    // Legacy Mercury Notify only on meaningful changes — Spotify rejects SEND to the
+    // Legacy Mercury Notify only on meaningful changes -- Spotify rejects SEND to the
     // broadcast channel with 400, so flooding every 1 s for position-only updates is wasteful.
     if ((playing_changed || vol_changed) && started_.load())
         send_notify(playing, pos_ms, vol_pct);
     // Push connect-state on meaningful changes, or every 15 s while playing so the
     // host app's seek bar has a fresh position_as_of_timestamp to interpolate from.
-    int64_t now_ms = now_ms_wiiu();
+    int64_t now_ms = now_ms_spirc();
     if (playing_changed)
         put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing, pos_ms, vol_pct);
     else if (vol_changed)
@@ -1540,7 +1552,7 @@ void Spirc::skip(bool next_track) {
     }
 
     current_track_uri_ = uri;
-    WHBLogPrintf("spirc: local %s → idx=%u uri=%.40s", next_track ? "Next" : "Prev",
+    PLAT_LOGF("spirc: local %s → idx=%u uri=%.40s", next_track ? "Next" : "Prev",
                  playing_track_idx_, uri.c_str());
     if (!uri.empty() && callbacks_.on_play) callbacks_.on_play(uri, 0);
     if (gid.size() == 16) fetch_track_metadata(gid, 0);
@@ -1561,7 +1573,7 @@ void Spirc::seek_to(int pos_ms) {
 
 void Spirc::toggle_shuffle() {
     shuffle_ = !shuffle_;
-    WHBLogPrintf("spirc: shuffle=%d", (int)shuffle_);
+    PLAT_LOGF("spirc: shuffle=%d", (int)shuffle_);
     put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 }
 
@@ -1574,7 +1586,7 @@ void Spirc::toggle_repeat() {
     } else {
         repeat_ = false; repeat_track_ = false;
     }
-    WHBLogPrintf("spirc: repeat ctx=%d track=%d", (int)repeat_, (int)repeat_track_);
+    PLAT_LOGF("spirc: repeat ctx=%d track=%d", (int)repeat_, (int)repeat_track_);
     put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 }
 
@@ -1598,7 +1610,7 @@ void Spirc::replay_current() {
     const std::vector<uint8_t> &gid = (i < track_gids_.size()) ? track_gids_[i]
                                                                  : track_gids_[0];
     current_track_uri_ = uri;
-    WHBLogPrintf("spirc: replay idx=%zu uri=%.40s", i, uri.c_str());
+    PLAT_LOGF("spirc: replay idx=%zu uri=%.40s", i, uri.c_str());
     playing_ = true; pos_ms_ = 0;
     if (started_playing_at_ms_ == 0)
         started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
@@ -1655,7 +1667,7 @@ void Spirc::handle_mercury_response(const std::vector<uint8_t> &payload) {
     {
         std::lock_guard<std::mutex> lk(pending_mu_);
         auto it = pending_.find(seq);
-        if (it == pending_.end()) return;  // SEND/SUB ack — no callback, discard silently
+        if (it == pending_.end()) return;  // SEND/SUB ack -- no callback, discard silently
         cb = std::move(it->second.cb);
         pending_.erase(it);
     }
@@ -1670,7 +1682,7 @@ void Spirc::handle_mercury_response(const std::vector<uint8_t> &payload) {
             else hdr.skip(hw);
         }
         if (parts.size() < 2 || status >= 400)
-            WHBLogPrintf("spirc: mercury_resp seq=%u status=%llu parts=%zu uri='%s'",
+            PLAT_LOGF("spirc: mercury_resp seq=%u status=%llu parts=%zu uri='%s'",
                          seq, (unsigned long long)status, parts.size(), uri.c_str());
     }
 
@@ -1700,9 +1712,9 @@ void Spirc::handle_mercury_event(const std::vector<uint8_t> &payload) {
         while (vrd.next(vf, vw)) {
             if (vf == 1 && vw == 0) {
                 uint64_t v; vrd.vi(v);
-                int raw = (int)v;  // 0–65535
+                int raw = (int)v;  // 0-65535
                 int pct = (int)((uint64_t)raw * 100 / 65535);
-                WHBLogPrintf("spirc: SetVolumeCommand vol=%d (%d%%)", raw, pct);
+                PLAT_LOGF("spirc: SetVolumeCommand vol=%d (%d%%)", raw, pct);
                 vol_pct_ = pct;
                 if (callbacks_.on_volume) callbacks_.on_volume(pct);
                 put_connect_state_async(5 /* VOLUME_CHANGED */, playing_, pos_ms_, pct);
@@ -1712,19 +1724,19 @@ void Spirc::handle_mercury_event(const std::vector<uint8_t> &payload) {
     }
 
     // ClusterUpdate can also arrive via Mercury (older path / reconnect window).
-    // Reuse the Dealer handler — same binary proto format.
+    // Reuse the Dealer handler -- same binary proto format.
     static constexpr char CL[] = "hm://connect-state/v1/cluster";
     if (uri.compare(0, sizeof(CL) - 1, CL) == 0) {
         handle_dealer_message(uri, parts[1]);
         return;
     }
 
-    // All other Mercury events: old Spirc frame format — but only on the Spirc
+    // All other Mercury events: old Spirc frame format -- but only on the Spirc
     // notification topic.  Ignore unsolicited AP pushes (herodotus, recently-played,
     // etc.) whose payloads are not Spirc frames and would be misinterpreted.
     static constexpr char kSpircPfx[] = "hm://remote/3/user/";
     if (uri.compare(0, sizeof(kSpircPfx) - 1, kSpircPfx) != 0) return;
-    WHBLogPrintf("spirc: frame uri='%.60s'", uri.c_str());
+    PLAT_LOGF("spirc: frame uri='%.60s'", uri.c_str());
     handle_frame(parts[1]);
 }
 
@@ -1737,7 +1749,7 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
     std::string ident;
     uint32_t    volume    = 0;  // 0-65535 (field 9)
     uint32_t    position  = 0;  // field 8 (seek/start position)
-    int64_t     state_update_id = 0;  // field 15 — echoed back in Notify
+    int64_t     state_update_id = 0;  // field 15 -- echoed back in Notify
 
     // State (field 7)
     uint32_t state_pos_ms     = 0;
@@ -1796,16 +1808,16 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
     // Ignore our own echoed Frames
     if (ident == device_id_) return;
 
-    WHBLogPrintf("spirc: frame type=%u from='%s'", msg_type, ident.c_str());
+    PLAT_LOGF("spirc: frame type=%u from='%s'", msg_type, ident.c_str());
 
     switch (msg_type) {
     case 0:             // kHello in proto3: typ field absent → default 0
     case MsgType::Hello:
-        // Another device is announcing itself. If we're active, yield to it —
+        // Another device is announcing itself. If we're active, yield to it --
         // this is the Spirc v1 device-switch signal (modern Spotify sends typ=0
         // because proto3 omits default enum values on the wire).
         if (playing_) {
-            WHBLogPrint("spirc: kHello while playing — yielding to other device");
+            PLAT_LOG("spirc: kHello while playing -- yielding to other device");
             playing_ = false;
             current_track_uri_.clear();
             started_playing_at_ms_ = 0;
@@ -1815,7 +1827,7 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
         break;
     case MsgType::Notify:
-        // Another device pushed its state — reply with ours for synchronisation.
+        // Another device pushed its state -- reply with ours for synchronisation.
         if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
         break;
 
@@ -1846,7 +1858,7 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         int pos = state_pos_ms > 0 ? (int)state_pos_ms
                 : position    > 0 ? (int)position : 0;
 
-        WHBLogPrintf("spirc: Load tracks=%zu idx=%zu uri='%s' gid=%zu pos=%d",
+        PLAT_LOGF("spirc: Load tracks=%zu idx=%zu uri='%s' gid=%zu pos=%d",
                      track_uris.size(), idx, track_uri.c_str(),
                      track_gid.size(), pos);
 
@@ -1914,7 +1926,7 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         const auto &gid = track_gids_[playing_track_idx_];
         const auto &uri = playing_track_idx_ < track_uris_.size()
                         ? track_uris_[playing_track_idx_] : std::string{};
-        WHBLogPrintf("spirc: %s → idx=%u uri='%s'",
+        PLAT_LOGF("spirc: %s → idx=%u uri='%s'",
                      msg_type == MsgType::Next ? "Next" : "Prev",
                      playing_track_idx_, uri.c_str());
         if (!uri.empty() && callbacks_.on_play) callbacks_.on_play(uri, 0);
@@ -1942,7 +1954,7 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         break; // nothing to do when another device leaves
 
     default:
-        WHBLogPrintf("spirc: unhandled frame type=%u", msg_type);
+        PLAT_LOGF("spirc: unhandled frame type=%u", msg_type);
         break;
     }
 }
@@ -1981,7 +1993,7 @@ static std::vector<uint8_t> http_post_proto(
     long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
     if (rc != CURLE_OK || code < 200 || code >= 300) {
-        WHBLogPrintf("spirc: POST %s → %ld", url.c_str(), code); return {};
+        PLAT_LOGF("spirc: POST %s → %ld", url.c_str(), code); return {};
     }
     return resp;
 }
@@ -2020,7 +2032,7 @@ static std::vector<uint8_t> solve_hashcash(
 }
 
 // Decode hex string → bytes (case-insensitive).
-// Step 1: login5 — POST StoredCredential directly, no client-token needed.
+// Step 1: login5 -- POST StoredCredential directly, no client-token needed.
 // The reusable_auth_credentials from APWelcome (195B) work as StoredCredential.data.
 static std::string get_access_token(
     const std::string &username,
@@ -2060,7 +2072,7 @@ static std::string get_access_token(
                 }
                 got_ok = true;
             } else if (f == 2 && w == 0) { uint64_t v; rd.vi(v); got_err=true;
-                WHBLogPrintf("spirc: login5 error=%llu", (unsigned long long)v);
+                PLAT_LOGF("spirc: login5 error=%llu", (unsigned long long)v);
             } else if (f == 3 && w == 2) {
                 PRd ch; rd.enter(ch); uint32_t cf; uint8_t cw;
                 while (ch.next(cf, cw)) {
@@ -2083,13 +2095,13 @@ static std::string get_access_token(
             } else rd.skip(w);
         }
         if (got_ok && !atk.empty()) {
-            WHBLogPrintf("spirc: login5 access_token (%zu chars)", atk.size()); return atk;
+            PLAT_LOGF("spirc: login5 access_token (%zu chars)", atk.size()); return atk;
         }
         if (got_err || !got_ch) return {};
-        WHBLogPrintf("spirc: login5 hashcash bits=%d", hc_len);
+        PLAT_LOGF("spirc: login5 hashcash bits=%d", hc_len);
         sol = solve_hashcash(login_ctx, hc_pfx, hc_len);
-        if (sol.empty()) { WHBLogPrint("spirc: hashcash failed"); return {}; }
-        WHBLogPrint("spirc: hashcash solved, retrying login5");
+        if (sol.empty()) { PLAT_LOG("spirc: hashcash failed"); return {}; }
+        PLAT_LOG("spirc: hashcash solved, retrying login5");
     }
     return {};
 }
@@ -2110,7 +2122,7 @@ static std::string resolve_spclient_host() {
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_perform(curl);
     curl_easy_cleanup(curl);
-    // {"spclient":["host:port",...]} — extract first hostname, strip :port
+    // {"spclient":["host:port",...]} -- extract first hostname, strip :port
     const char *key = "\"spclient\":[\"";
     auto pos = body.find(key);
     if (pos == std::string::npos) return {};
@@ -2119,7 +2131,7 @@ static std::string resolve_spclient_host() {
     std::string entry = body.substr(pos, end - pos);
     auto colon = entry.rfind(':');
     if (colon != std::string::npos) entry = entry.substr(0, colon);
-    WHBLogPrintf("spirc: spclient host: %s", entry.c_str());
+    PLAT_LOGF("spirc: spclient host: %s", entry.c_str());
     return entry;
 }
 
@@ -2129,7 +2141,7 @@ std::string Spirc::resolve_cdn_http(const std::vector<uint8_t> &file_id) {
 
     if (atk.empty()) {
         atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
-        if (atk.empty()) { WHBLogPrint("spirc: login5 failed"); return {}; }
+        if (atk.empty()) { PLAT_LOG("spirc: login5 failed"); return {}; }
         std::lock_guard<std::mutex> lk(token_mu_);
         access_token_ = atk;
     }
@@ -2164,7 +2176,7 @@ std::string Spirc::resolve_cdn_http(const std::vector<uint8_t> &file_id) {
     long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
 
-    WHBLogPrintf("spirc: storage-resolve HTTP %ld body=%zu curl=%d (%s)",
+    PLAT_LOGF("spirc: storage-resolve HTTP %ld body=%zu curl=%d (%s)",
                  code, body.size(), (int)rc, curl_easy_strerror(rc));
     if (rc != CURLE_OK || body.empty() || code != 200) return {};
 
@@ -2173,17 +2185,22 @@ std::string Spirc::resolve_cdn_http(const std::vector<uint8_t> &file_id) {
     while (rd.next(f, w)) {
         if (f == 2 && w == 2) { rd.read_str(cdn_url); break; } else rd.skip(w);
     }
-    WHBLogPrintf("spirc: cdn_url: %.70s", cdn_url.c_str());
+    PLAT_LOGF("spirc: cdn_url: %.70s", cdn_url.c_str());
     return cdn_url;
 }
 
 void Spirc::resolve_cdn(const std::vector<uint8_t> &file_id,
                          std::function<void(bool, std::string)> cb) {
-    std::thread([this, file_id, cb = std::move(cb)]() mutable {
-        OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
-        std::string url = resolve_cdn_http(file_id);
-        cb(!url.empty(), url);
-    }).detach();
+    struct RcArg { Spirc *self; std::vector<uint8_t> file_id; std::function<void(bool, std::string)> cb; };
+    auto *rarg = new RcArg{this, file_id, std::move(cb)};
+    pthread_t pth; pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 1024*1024);
+    pthread_create(&pth, &attr, [](void *vp) -> void* {
+        auto *a = static_cast<RcArg*>(vp);
+        std::string url = a->self->resolve_cdn_http(a->file_id);
+        a->cb(!url.empty(), url);
+        delete a; return nullptr;
+    }, rarg);
+    pthread_attr_destroy(&attr); pthread_detach(pth);
 }
 
 // ── Track metadata fetch ──────────────────────────────────────────────────────
@@ -2192,7 +2209,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
     std::string uri = "hm://metadata/3/track/" + hex_encode(gid);
     mercury_get(uri, [this, gid, pos_ms](bool ok, std::vector<std::vector<uint8_t>> parts) {
         if (!ok || parts.size() < 2) {
-            WHBLogPrint("spirc: metadata fetch failed");
+            PLAT_LOG("spirc: metadata fetch failed");
             return;
         }
 
@@ -2290,7 +2307,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                 break;
             }
             case 13: {                          // Track.alternative (repeated Track)
-                // Alternative tracks have their own GID — must use it when requesting the key.
+                // Alternative tracks have their own GID -- must use it when requesting the key.
                 PRd alt; rd.enter(alt);
                 std::vector<uint8_t> alt_gid;
                 std::vector<uint8_t> alt_best_fid;
@@ -2317,7 +2334,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                 if (!alt_best_fid.empty() && alt_best_fmt > best_fmt) {
                     best_fmt     = alt_best_fmt;
                     best_file_id = alt_best_fid;
-                    best_file_gid = alt_gid.size() == 16 ? alt_gid : gid;
+                    best_file_gid = gid;  // AES key lookup uses main track GID, not alt's
                 }
                 break;
             }
@@ -2325,7 +2342,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
             }
         }
 
-        WHBLogPrintf("spirc: metadata '%s' / '%s' fmt=%d dur=%lldms explicit=%d isrc=%s",
+        PLAT_LOGF("spirc: metadata '%s' / '%s' fmt=%d dur=%lldms explicit=%d isrc=%s",
                      title.c_str(), artist.c_str(), best_fmt, (long long)duration_ms, (int)is_explicit,
                      isrc.c_str());
         if (duration_ms > 0) duration_ms_ = duration_ms;
@@ -2441,7 +2458,7 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
     mercury_get(muri, [this, context_uri, current_uri](bool ok,
                 std::vector<std::vector<uint8_t>> parts) {
         if (!ok || parts.size() < 2 || parts[1].empty()) {
-            WHBLogPrintf("spirc: ctx_resolve failed ok=%d parts=%zu", (int)ok, parts.size());
+            PLAT_LOGF("spirc: ctx_resolve failed ok=%d parts=%zu", (int)ok, parts.size());
             return;
         }
         if (context_uri_ != context_uri) return;
@@ -2456,7 +2473,7 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
         parse_context_body(parts[1], uris, gids, uids, page_urls);
 
         if (uris.empty()) {
-            WHBLogPrintf("spirc: ctx_resolve: no inline tracks (page_urls=%zu)", page_urls.size());
+            PLAT_LOGF("spirc: ctx_resolve: no inline tracks (page_urls=%zu)", page_urls.size());
             // still fetch deferred pages
         } else {
             bool found = false;
@@ -2465,7 +2482,7 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
                 if (uris[k] == current_uri) { new_idx = k; found = true; break; }
             }
 
-            WHBLogPrintf("spirc: ctx_resolve: %zu tracks found=%d idx=%zu deferred_pages=%zu",
+            PLAT_LOGF("spirc: ctx_resolve: %zu tracks found=%d idx=%zu deferred_pages=%zu",
                          uris.size(), (int)found, new_idx, page_urls.size());
 
             if (found) {
@@ -2477,9 +2494,9 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
                 if (started_.load())
                     put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
             } else {
-                // Current track not in first page — likely a later deferred page.
+                // Current track not in first page -- likely a later deferred page.
                 // Keep the cluster-window data; deferred fetches will append the rest.
-                WHBLogPrintf("spirc: ctx_resolve: current track not in first page, awaiting deferred pages");
+                PLAT_LOGF("spirc: ctx_resolve: current track not in first page, awaiting deferred pages");
             }
         }
 
@@ -2489,7 +2506,7 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
             if (!resolved.empty())
                 fetch_context_page(resolved, context_uri);
             else
-                WHBLogPrintf("spirc: ctx_resolve: unrecognised page_url '%s'", pu.c_str());
+                PLAT_LOGF("spirc: ctx_resolve: unrecognised page_url '%s'", pu.c_str());
         }
     });
 }
@@ -2500,7 +2517,7 @@ void Spirc::fetch_context_page(const std::string &page_ctx_uri,
     mercury_get(muri, [this, page_ctx_uri, context_uri](bool ok,
                 std::vector<std::vector<uint8_t>> parts) {
         if (!ok || parts.size() < 2 || parts[1].empty()) {
-            WHBLogPrintf("spirc: ctx_page '%s' failed", page_ctx_uri.c_str());
+            PLAT_LOGF("spirc: ctx_page '%s' failed", page_ctx_uri.c_str());
             return;
         }
         if (context_uri_ != context_uri) return;
@@ -2512,11 +2529,11 @@ void Spirc::fetch_context_page(const std::string &page_ctx_uri,
         parse_context_body(parts[1], uris, gids, uids, more_urls);
 
         if (uris.empty()) {
-            WHBLogPrintf("spirc: ctx_page '%s': no tracks", page_ctx_uri.c_str());
+            PLAT_LOGF("spirc: ctx_page '%s': no tracks", page_ctx_uri.c_str());
             return;
         }
 
-        WHBLogPrintf("spirc: ctx_page '%s': +%zu tracks (total now %zu)",
+        PLAT_LOGF("spirc: ctx_page '%s': +%zu tracks (total now %zu)",
                      page_ctx_uri.c_str(), uris.size(), track_uris_.size() + uris.size());
 
         for (auto &u : uris) track_uris_.push_back(u);

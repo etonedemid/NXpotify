@@ -3,12 +3,14 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <thread>
+#include <pthread.h>
 #include <vector>
+#include <string>
 #include "../discovery/zeroconf.h"
-#include "../olv/olv.h"
 #include "../ui/display.h"
 
-// Forward declarations — full headers pulled in player.cpp only
+// Forward declarations -- full headers pulled in player.cpp only
 namespace Connect { class AP; class Spirc; class AudioPipeline; }
 
 namespace Connect {
@@ -31,7 +33,7 @@ public:
     Player();
     ~Player();
 
-    void run();   // blocks until WHBProcIsRunning() is false
+    void run();   // blocks until appletMainLoop() returns false
 
 private:
     void on_credentials(Discovery::Credentials creds);
@@ -50,14 +52,14 @@ private:
     // Receives every AP packet not handled internally by AP (AesKey, Mercury, …)
     void on_ap_packet(uint8_t cmd, std::vector<uint8_t> payload);
 
-    // GamePad input (called from main loop, vpad already read)
+    // First-time Spotify auth via device code + QR.  Called in a background
+    // thread when no saved credentials exist on the SD card.
+    void device_auth();
+
+    // Switch controller input (called each frame from run())
     void handle_buttons(uint32_t trigger);
-    // GamePad touch input (DRC touchscreen)
-    void handle_touch(const void *vpad_status);   // takes VPADStatus*; void* avoids header pull-in
-    // Wiimote input (called from main loop, kpad already read)
-    void handle_wiimote_buttons(uint32_t trigger);
-    // Pro Controller input (called from main loop, kpad.pro already read)
-    void handle_pro_buttons(uint32_t trigger);
+    // Switch touchscreen input (called each frame from run())
+    void handle_touch();
 
     struct TouchState {
         bool    active   = false;
@@ -69,9 +71,6 @@ private:
     };
     TouchState touch_;
 
-    // Show a stamp pack picker overlay; returns false if user cancelled.
-    bool show_stamp_pack_picker();
-
     enum class State { WaitingForUser, Connecting, Ready, Playing };
     std::atomic<State>    state_{State::WaitingForUser};
     std::atomic<uint32_t> ap_gen_{0};  // incremented each time a new AP is created
@@ -82,28 +81,16 @@ private:
     std::unique_ptr<AudioPipeline>   audio_;
     UI::Display                      display_;
 
-    int            volume_          = 100;
-    bool           spirc_playing_   = false;
-    int            track_dur_ms_    = 0;
+    int            volume_           = 100;
+    bool           spirc_playing_    = false;
+    int            track_dur_ms_     = 0;
     std::string    track_title_;
     std::string    track_artist_;
     std::string    track_id_;
     std::string    isrc_;
-    bool           track_explicit_  = false;
-    bool           crystal_enabled_ = false;
-    int            crystal_strength_= 5;     // 1–10
-
-    // ── Roséverse OLV ────────────────────────────────────────────────────────
-    std::vector<OLV::Post> olv_posts_;
-    size_t                olv_post_idx_       = 0;
-    uint64_t              olv_last_advance_   = 0;   // OSGetSystemTick of last auto-advance or fetch
-    uint64_t              olv_shown_at_       = 0;   // OSGetSystemTick when current post first shown
-    std::mutex            olv_mu_;
-    std::thread           olv_init_thread_;
-    std::thread           olv_fetch_thread_;
-    std::atomic<bool>     olv_fetching_{false};
-    void olv_show_current();        // push current post to display (call under olv_mu_)
-    void olv_fetch(uint32_t cid);   // blocking fetch, runs on olv_fetch_thread_
+    bool           track_explicit_   = false;
+    bool           crystal_enabled_  = false;
+    int            crystal_strength_ = 5;     // 1-10
 
     // Pending audio start state (CDN URL arrives first; AES key comes second)
     std::mutex              aes_mu_;
@@ -112,10 +99,11 @@ private:
     std::vector<uint8_t>    pending_file_id_;
     int                     pending_pos_ms_ = 0;
 
-    // Serialises credential processing — drops duplicate addUser pushes that
+    // Serialises credential processing -- drops duplicate addUser pushes that
     // arrive while we're mid-handshake (Spotify app often retries quickly).
     std::mutex          connect_mu_;
-    std::thread         connect_thread_;
+    // pthread so we can set a large stack (AP TLS handshake overflows std::thread default).
+    pthread_t           connect_pth_ = 0;
     // Set true in on_credentials before ap_->disconnect() so on_disconnect
     // knows not to reset the display (we're about to bring up a new session).
     std::atomic<bool>   reconnecting_{false};

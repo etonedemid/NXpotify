@@ -128,7 +128,7 @@ fn has_wiiu_dir(root: &Path) -> bool {
 
 #[cfg(target_os = "windows")]
 fn find_sd_card() -> Option<PathBuf> {
-    // C: is always the system drive — skip it.
+    // C: is always the system drive -- skip it.
     // Prefer a drive that has both wiiu/ and an Aroma environment.
     // Fall back to a drive that has wiiu/ but no Aroma (still a Wii U SD card,
     // just without Aroma installed yet).
@@ -225,7 +225,7 @@ fn pick_aroma_environment(sd: &Path) -> Option<PathBuf> {
             }
             println!();
             let answer = prompt(&format!(
-                "  Which environment will you boot into? [1–{}]: ",
+                "  Which environment will you boot into? [1-{}]: ",
                 envs.len()
             ));
             let idx = answer.trim().parse::<usize>().unwrap_or(1);
@@ -258,7 +258,7 @@ const GITHUB_API: &str =
 struct ReleaseAssets {
     tag:  String,
     wuhb: PathBuf,              // spotify-wiiu.wuhb
-    wps:  Option<PathBuf>,      // spotify-cache-sweep.wps (optional — may not exist yet)
+    wps:  Option<PathBuf>,      // spotify-cache-sweep.wps (optional -- may not exist yet)
 }
 
 fn download_release_assets(want_wps: bool, out_dir: &Path) -> Result<ReleaseAssets, Box<dyn std::error::Error>> {
@@ -335,7 +335,7 @@ fn spawn_log_reader(
 fn main() {
     println!();
     println!("  ╔══════════════════════════════════════════════╗");
-    println!("  ║        Spotify Wii U — Setup Tool           ║");
+    println!("  ║        Spotify Wii U -- Setup Tool           ║");
     println!("  ╚══════════════════════════════════════════════╝");
     println!();
 
@@ -382,7 +382,7 @@ fn main() {
         .unwrap_or_else(|e| {
             if e.kind() == io::ErrorKind::PermissionDenied {
                 fail(&format!(
-                    "Cannot execute {} — permission denied.\n  \
+                    "Cannot execute {} -- permission denied.\n  \
                     Run:  chmod +x {}",
                     librespot.display(), librespot.display()
                 ));
@@ -416,7 +416,7 @@ fn main() {
     }
 
     if !creds_file.exists() {
-        fail("credentials.json was not written — try running again.");
+        fail("credentials.json was not written -- try running again.");
     }
 
     // Step 3 ── convert ────────────────────────────────────────────────────
@@ -473,11 +473,11 @@ fn main() {
     if install_env.is_none() {
         match &install_sd {
             Some(sd) => {
-                warn(&format!("Aroma not found on {} — skipping install.", sd.display()));
+                warn(&format!("Aroma not found on {} -- skipping install.", sd.display()));
                 warn("Install Aroma first: https://wiiu.hacks.guide/");
             }
             None => {
-                warn("No Wii U SD card detected — skipping install.");
+                warn("No Wii U SD card detected -- skipping install.");
                 warn("Insert your SD card (with Aroma) and re-run, or grab the release manually:");
                 info("  https://github.com/Happynico7504/spotify-wiiu/releases/latest");
             }

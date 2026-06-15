@@ -19,7 +19,7 @@ class H(http.server.BaseHTTPRequestHandler):
         global code
         code = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('code',[None])[0]
         self.send_response(200); self.end_headers()
-        self.wfile.write("OK — close this tab")
+        self.wfile.write("OK -- close this tab")
     def log_message(self, *a): pass
 
 http.server.HTTPServer(('', 8888), H).handle_request()

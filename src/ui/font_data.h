@@ -1,4 +1,4 @@
-// LiberationSans-Regular.ttf (410820 bytes) — embedded font
+// LiberationSans-Regular.ttf (410820 bytes) -- embedded font
 #pragma once
 #include <cstdint>
 #include <cstddef>

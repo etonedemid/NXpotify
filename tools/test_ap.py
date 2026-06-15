@@ -131,14 +131,14 @@ if not server_pub:
     print("ERROR: failed to parse server pubkey"); sys.exit(1)
 print(f"  server_pub[0..3]: {server_pub[:4].hex()} ({len(server_pub)} bytes)")
 
-# DH shared secret — always 96 bytes, zero-padded
+# DH shared secret -- always 96 bytes, zero-padded
 srv_int    = int.from_bytes(server_pub, 'big')
 shared_int = pow(srv_int, priv_key, DH_PRIME)
 shared     = shared_int.to_bytes(96, 'big')
 print(f"  shared[0..3]: {shared[:4].hex()}")
 
 # Key derivation: HMAC-SHA1(key=shared, msg=client_hello_raw || ap_raw || [i])
-# [i] is LAST — matches librespot (mac.update(packets); mac.update(&[i]))
+# [i] is LAST -- matches librespot (mac.update(packets); mac.update(&[i]))
 key_data = b""
 for i in range(1, 6):
     h = hmaclib.new(shared, digestmod=hashlib.sha1)
@@ -201,6 +201,6 @@ if r:
         else:
             print(f"  → Encrypted data (channel open!)")
 else:
-    print("  Server sent nothing (timeout) — channel accepted?")
+    print("  Server sent nothing (timeout) -- channel accepted?")
 
 s.close()

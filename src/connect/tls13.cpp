@@ -10,10 +10,10 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#include <coreinit/time.h>
-#include <coreinit/thread.h>
 
-// File-static curl handle — set when using curl for I/O instead of raw recv().
+
+
+// File-static curl handle -- set when using curl for I/O instead of raw recv().
 // Raw POSIX recv() is permanently broken for outbound TCP on Wii U; curl's
 // socket layer works correctly. connect_via_curl() sets this before calling
 // do_handshake() so that tcp_send_all/recv_all transparently use curl I/O.
@@ -26,7 +26,7 @@ static CURL *g_curl = nullptr;
 #include <mbedtls/ecp.h>
 #include <mbedtls/bignum.h>
 
-#include <whb/log.h>
+#include "platform.h"
 
 // ── Wire helpers ──────────────────────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ static bool tcp_send_all(int fd, const uint8_t* buf, size_t len) {
         while (len > 0) {
             size_t sent = 0;
             CURLcode rc = curl_easy_send(g_curl, buf, len, &sent);
-            if (rc == CURLE_AGAIN) { OSSleepTicks(OSMillisecondsToTicks(1)); continue; }
+            if (rc == CURLE_AGAIN) { plat_sleep_ms(1); continue; }
             if (rc != CURLE_OK || sent == 0) return false;
             buf += sent; len -= sent;
         }
@@ -76,8 +76,8 @@ static bool tcp_recv_all(int fd, uint8_t* buf, size_t len, int /*timeout_ms*/ = 
         while (len > 0) {
             size_t got = 0;
             CURLcode rc = curl_easy_recv(g_curl, buf, len, &got);
-            if (rc == CURLE_AGAIN) { OSSleepTicks(OSMillisecondsToTicks(10)); continue; }
-            WHBLogPrintf("tls13: curl_recv got=%zu rc=%d", got, (int)rc);
+            if (rc == CURLE_AGAIN) { plat_sleep_ms(10); continue; }
+            PLAT_LOGF("tls13: curl_recv got=%zu rc=%d", got, (int)rc);
             if (rc != CURLE_OK || got == 0) return false;
             buf += got; len -= got;
         }
@@ -86,14 +86,14 @@ static bool tcp_recv_all(int fd, uint8_t* buf, size_t len, int /*timeout_ms*/ = 
     // Fallback: raw blocking recv (only for non-curl paths).
     while (len > 0) {
         ssize_t n = ::recv(fd, buf, len, 0);
-        WHBLogPrintf("tls13: recv n=%d errno=%d", (int)n, errno);
+        PLAT_LOGF("tls13: recv n=%d errno=%d", (int)n, errno);
         if (n > 0) {
             buf += n; len -= (size_t)n;
         } else if (n == 0) {
-            WHBLogPrint("tls13: recv eof");
+            PLAT_LOG("tls13: recv eof");
             return false;
         } else {
-            WHBLogPrintf("tls13: recv error errno=%d", errno);
+            PLAT_LOGF("tls13: recv error errno=%d", errno);
             return false;
         }
     }
@@ -118,7 +118,7 @@ static void ensure_sha256_info() {
     if (!S256) S256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
 }
 
-// HKDF-Expand-Label(secret, label, context, length) — RFC 8446 §7.1
+// HKDF-Expand-Label(secret, label, context, length) -- RFC 8446 §7.1
 static void expand_label(
     const uint8_t* secret, size_t slen,
     const char*    label,
@@ -137,13 +137,13 @@ static void expand_label(
     mbedtls_hkdf_expand(S256, secret, slen, info.data(), info.size(), out, out_len);
 }
 
-// SHA-256("") — cached constant
+// SHA-256("") -- cached constant
 static const uint8_t EMPTY_HASH[32] = {
     0xe3,0xb0,0xc4,0x42,0x98,0xfc,0x1c,0x14,0x9a,0xfb,0xf4,0xc8,0x99,0x6f,0xb9,0x24,
     0x27,0xae,0x41,0xe4,0x64,0x9b,0x93,0x4c,0xa4,0x95,0x99,0x1b,0x78,0x52,0xb8,0x55
 };
 
-// Derive-Secret(secret, label, transcript_hash) — transcript_hash may be null for empty
+// Derive-Secret(secret, label, transcript_hash) -- transcript_hash may be null for empty
 static void derive_secret(
     const uint8_t* secret, size_t slen,
     const char*    label,
@@ -242,16 +242,16 @@ static bool recv_enc_record(int fd, uint64_t& seq,
         std::vector<uint8_t> rec;
         if (!recv_record(fd, rec_type, rec)) return false;
 
-        if (rec_type == 0x14) continue;  // TLS 1.2 CCS compat record — ignore
+        if (rec_type == 0x14) continue;  // TLS 1.2 CCS compat record -- ignore
 
         if (rec_type == 0x15) {
-            WHBLogPrintf("tls13: alert level=%u desc=%u",
+            PLAT_LOGF("tls13: alert level=%u desc=%u",
                          rec.size() > 0 ? rec[0] : 0u,
                          rec.size() > 1 ? rec[1] : 0u);
             return false;
         }
         if (rec_type != 0x17) {
-            WHBLogPrintf("tls13: unexpected record type 0x%02X", rec_type);
+            PLAT_LOGF("tls13: unexpected record type 0x%02X", rec_type);
             return false;
         }
 
@@ -260,7 +260,7 @@ static bool recv_enc_record(int fd, uint64_t& seq,
 
         std::vector<uint8_t> inner;
         if (!gcm_open(key, iv, seq, aad, 5, rec.data(), rec.size(), inner)) {
-            WHBLogPrint("tls13: GCM auth failure");
+            PLAT_LOG("tls13: GCM auth failure");
             return false;
         }
         ++seq;
@@ -306,10 +306,10 @@ static std::vector<uint8_t> build_client_hello(
     {
         int r = mbedtls_ecdh_gen_public(&ecdh_x25519.grp, &ecdh_x25519.d, &ecdh_x25519.Q,
                                          mbedtls_ctr_drbg_random, &drbg);
-        WHBLogPrintf("tls13: keygen x25519 gen_public rc=%d", r);
+        PLAT_LOGF("tls13: keygen x25519 gen_public rc=%d", r);
         if (r != 0) return {};
         r = mbedtls_mpi_write_binary_le(&ecdh_x25519.Q.X, x25519_pub, 32);
-        WHBLogPrintf("tls13: keygen x25519 write_le rc=%d pub0=%02X%02X%02X%02X",
+        PLAT_LOGF("tls13: keygen x25519 write_le rc=%d pub0=%02X%02X%02X%02X",
                      r, x25519_pub[0], x25519_pub[1], x25519_pub[2], x25519_pub[3]);
         if (r != 0) return {};
         x25519_pub_len = 32;
@@ -412,7 +412,7 @@ static bool parse_server_hello(const uint8_t* p, size_t len,
         0xc2,0xa2,0x11,0x16,0x7a,0xbb,0x8c,0x5e,0x07,0x9e,0x09,0xe2,0xc8,0xa8,0x33,0x9c
     };
     if (memcmp(random, HRR_RANDOM, 32) == 0) {
-        WHBLogPrint("tls13: server sent HelloRetryRequest");
+        PLAT_LOG("tls13: server sent HelloRetryRequest");
         return false;
     }
 
@@ -451,11 +451,11 @@ static bool parse_server_hello(const uint8_t* p, size_t len,
     }
 
     if (!got_tls13) {
-        WHBLogPrint("tls13: server didn't select TLS 1.3");
+        PLAT_LOG("tls13: server didn't select TLS 1.3");
         return false;
     }
     if (server_key_share.empty()) {
-        WHBLogPrint("tls13: no key_share in ServerHello");
+        PLAT_LOG("tls13: no key_share in ServerHello");
         return false;
     }
     return true;
@@ -494,16 +494,16 @@ bool TLS13Client::do_handshake(const char* hostname)
         hostname, client_random, session_id,
         x25519_pub, x25519_pub_len,
         ecdh_x25519_, drbg_);
-    if (ch_hs.empty()) { WHBLogPrint("tls13: ClientHello build failed (keygen?)"); return false; }
+    if (ch_hs.empty()) { PLAT_LOG("tls13: ClientHello build failed (keygen?)"); return false; }
 
     // ── send ClientHello as TLS 1.0 record (for middlebox compat) ────────────
     {
         uint8_t hdr[5] = { 0x16, 0x03, 0x01,
                            (uint8_t)(ch_hs.size() >> 8), (uint8_t)ch_hs.size() };
         if (!tcp_send_all(fd_, hdr, 5) || !tcp_send_all(fd_, ch_hs.data(), ch_hs.size())) {
-            WHBLogPrint("tls13: ClientHello send failed"); return false;
+            PLAT_LOG("tls13: ClientHello send failed"); return false;
         }
-        WHBLogPrintf("tls13: ClientHello sent (%zu bytes total, body=%zu)",
+        PLAT_LOGF("tls13: ClientHello sent (%zu bytes total, body=%zu)",
                      5 + ch_hs.size(), ch_hs.size());
     }
 
@@ -522,30 +522,30 @@ bool TLS13Client::do_handshake(const char* hostname)
         // Skip CCS compat record if present
         do {
             if (!recv_record(fd_, rec_type, rec)) {
-                WHBLogPrint("tls13: recv ServerHello failed"); return false;
+                PLAT_LOG("tls13: recv ServerHello failed"); return false;
             }
         } while (rec_type == 0x14);
 
         if (rec_type == 0x15) {
-            WHBLogPrintf("tls13: alert %u", rec.size() > 1 ? rec[1] : 0u);
+            PLAT_LOGF("tls13: alert %u", rec.size() > 1 ? rec[1] : 0u);
             return false;
         }
         if (rec_type != 0x16 || rec.size() < 4) {
-            WHBLogPrintf("tls13: expected handshake record, got 0x%02X", rec_type);
+            PLAT_LOGF("tls13: expected handshake record, got 0x%02X", rec_type);
             return false;
         }
         // Handshake message: type(1) + length(3) + body
         if (rec[0] != 0x02) {
-            WHBLogPrintf("tls13: expected ServerHello (0x02), got 0x%02X", rec[0]);
+            PLAT_LOGF("tls13: expected ServerHello (0x02), got 0x%02X", rec[0]);
             return false;
         }
         uint32_t sh_body_len = gu24(rec.data() + 1);
-        if (4 + sh_body_len > rec.size()) { WHBLogPrint("tls13: SH truncated"); return false; }
+        if (4 + sh_body_len > rec.size()) { PLAT_LOG("tls13: SH truncated"); return false; }
 
         if (!parse_server_hello(rec.data() + 4, sh_body_len, sh_group, sh_key_share)) {
-            WHBLogPrint("tls13: ServerHello parse failed"); return false;
+            PLAT_LOG("tls13: ServerHello parse failed"); return false;
         }
-        WHBLogPrintf("tls13: ServerHello: group=0x%04X share_len=%zu",
+        PLAT_LOGF("tls13: ServerHello: group=0x%04X share_len=%zu",
                      sh_group, sh_key_share.size());
         // Update transcript with full ServerHello handshake message
         transcript_update(transcript, rec.data(), 4 + sh_body_len);
@@ -561,20 +561,20 @@ bool TLS13Client::do_handshake(const char* hostname)
         } else if (sh_group == 0x0017) { // secp256r1
             ecdh = &ecdh_p256_;
         } else {
-            WHBLogPrintf("tls13: unsupported server group 0x%04X", sh_group);
+            PLAT_LOGF("tls13: unsupported server group 0x%04X", sh_group);
             return false;
         }
 
         if (mbedtls_ecdh_read_public(ecdh, sh_key_share.data(), sh_key_share.size()) != 0) {
-            WHBLogPrint("tls13: ecdh_read_public failed"); return false;
+            PLAT_LOG("tls13: ecdh_read_public failed"); return false;
         }
         size_t ss_len = 0;
         if (mbedtls_ecdh_calc_secret(ecdh, &ss_len, shared, sizeof(shared),
                                       mbedtls_ctr_drbg_random, &drbg_) != 0) {
-            WHBLogPrint("tls13: ecdh_calc_secret failed"); return false;
+            PLAT_LOG("tls13: ecdh_calc_secret failed"); return false;
         }
     }
-    WHBLogPrintf("tls13: ECDHE shared secret (%zu bytes computed)", (size_t)32);
+    PLAT_LOGF("tls13: ECDHE shared secret (%zu bytes computed)", (size_t)32);
 
     // ── TLS 1.3 key schedule (RFC 8446 §7.1) ─────────────────────────────────
     uint8_t zeros32[32] = {};
@@ -591,7 +591,7 @@ bool TLS13Client::do_handshake(const char* hostname)
     // handshake_secret = HKDF-Extract(derived, shared_secret)
     mbedtls_hkdf_extract(S256, derived, 32, shared, 32, hs_secret);
 
-    // Get transcript hash at (CH || SH) — used for handshake traffic secrets
+    // Get transcript hash at (CH || SH) -- used for handshake traffic secrets
     uint8_t hash_ch_sh[32];
     transcript_finish(transcript, hash_ch_sh);
 
@@ -619,10 +619,10 @@ bool TLS13Client::do_handshake(const char* hostname)
         uint8_t inner_type;
         std::vector<uint8_t> hs_rec;
         if (!recv_enc_record(fd_, s_hs_seq, s_hs_key, s_hs_iv, inner_type, hs_rec)) {
-            WHBLogPrint("tls13: recv encrypted hs record failed"); return false;
+            PLAT_LOG("tls13: recv encrypted hs record failed"); return false;
         }
         if (inner_type != 0x16) {
-            WHBLogPrintf("tls13: unexpected inner type 0x%02X in hs", inner_type);
+            PLAT_LOGF("tls13: unexpected inner type 0x%02X in hs", inner_type);
             return false;
         }
         // May be multiple handshake messages concatenated in one record
@@ -632,17 +632,17 @@ bool TLS13Client::do_handshake(const char* hostname)
             uint32_t msg_len = gu24(hs_rec.data() + rpos + 1);
             if (rpos + 4 + msg_len > hs_rec.size()) break;
 
-            (void)(hs_rec.data() + rpos + 4); // msg_body — not needed without cert verification
+            (void)(hs_rec.data() + rpos + 4); // msg_body -- not needed without cert verification
 
             // Update transcript with full handshake message (type+len+body)
             transcript_update(transcript, hs_rec.data() + rpos, 4 + msg_len);
-            WHBLogPrintf("tls13: hs msg type=0x%02X len=%u", msg_type, msg_len);
+            PLAT_LOGF("tls13: hs msg type=0x%02X len=%u", msg_type, msg_len);
 
             if (msg_type == 0x14) {  // Finished
                 // Verify server Finished:
                 // finished_key = HKDF-Expand-Label(s_hs_secret, "finished", "", 32)
                 // verify_data = HMAC-SHA256(finished_key, transcript_hash_before_finished)
-                // NOTE: transcript was updated AFTER the Finished message — we need
+                // NOTE: transcript was updated AFTER the Finished message -- we need
                 // the hash BEFORE including this Finished message. Let's compute it
                 // before the update above... actually we did the update already.
                 // We need to redo this: update transcript AFTER verifying Finished.
@@ -653,7 +653,7 @@ bool TLS13Client::do_handshake(const char* hostname)
                 // For simplicity (and since we don't strictly need to verify):
                 // Just skip strict verification and trust the server.
                 // The MAC on application data will catch any tampering anyway.
-                WHBLogPrint("tls13: got server Finished (not verifying cert)");
+                PLAT_LOG("tls13: got server Finished (not verifying cert)");
                 got_finished = true;
                 rpos += 4 + msg_len;
                 break;
@@ -662,7 +662,7 @@ bool TLS13Client::do_handshake(const char* hostname)
         }
     }
 
-    // Transcript hash through server Finished — for app traffic secrets
+    // Transcript hash through server Finished -- for app traffic secrets
     uint8_t hash_ch_sf[32];
     transcript_finish(transcript, hash_ch_sf);
 
@@ -689,11 +689,11 @@ bool TLS13Client::do_handshake(const char* hostname)
     uint64_t c_hs_seq = 0;
     if (!send_enc_record(fd_, c_hs_seq, c_hs_key, c_hs_iv,
                           fin_msg.data(), fin_msg.size(), 0x16)) {
-        WHBLogPrint("tls13: send Finished failed"); return false;
+        PLAT_LOG("tls13: send Finished failed"); return false;
     }
 
     mbedtls_sha256_free(&transcript);
-    WHBLogPrint("tls13: handshake complete");
+    PLAT_LOG("tls13: handshake complete");
     return true;
 }
 
@@ -764,7 +764,7 @@ bool TLS13Client::recv_exact(uint8_t* buf, size_t len,
         }
         if (stop.load()) return false;
 
-        // Blocking recv — no select/poll/fcntl needed.
+        // Blocking recv -- no select/poll/fcntl needed.
         // AP::disconnect() calls shutdown(fd_, SHUT_RDWR) which interrupts
         // the blocking recv() and causes recv_enc_record to return false,
         // breaking out of this loop naturally.
@@ -778,11 +778,11 @@ bool TLS13Client::recv_exact(uint8_t* buf, size_t len,
             // Application data
             app_buf_.insert(app_buf_.end(), data.begin(), data.end());
         } else if (inner_type == 0x16) {
-            // Post-handshake handshake message (e.g. NewSessionTicket) — discard
-            WHBLogPrintf("tls13: post-hs msg type=0x%02X len=%zu (discarded)",
+            // Post-handshake handshake message (e.g. NewSessionTicket) -- discard
+            PLAT_LOGF("tls13: post-hs msg type=0x%02X len=%zu (discarded)",
                          data.empty() ? 0 : data[0], data.size());
         } else {
-            WHBLogPrintf("tls13: unexpected app inner type 0x%02X", inner_type);
+            PLAT_LOGF("tls13: unexpected app inner type 0x%02X", inner_type);
             return false;
         }
     }

@@ -7,27 +7,29 @@ endif
 TOPDIR ?= $(CURDIR)
 
 #-------------------------------------------------------------------------------
-# App metadata (must come before wut_rules so WUHB_OPTIONS is built correctly)
+# App metadata
 #-------------------------------------------------------------------------------
-TARGET        := spotify-wiiu
-BUILD         := build
-DATA          :=
+TARGET      := nxpotify
+BUILD       := build
+DATA        :=
 
-APP_NAME       := Spotify Wii U
-APP_SHORTNAME  := Spotify
-APP_AUTHOR     := WiiU Homebrew
-APP_CONTENT    := $(TOPDIR)/content
-APP_ICON       := $(TOPDIR)/meta/icon.png
+APP_TITLE   := NXpotify
+APP_AUTHOR  := etonedemid
+APP_VERSION := 1.3.3.7
+APP_ICON    := $(TOPDIR)/meta/icon.jpg
 
-include $(DEVKITPRO)/wut/share/wut_rules
+include $(DEVKITPRO)/libnx/switch_rules
+
+ARCH    := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+MACHDEP := $(ARCH)
 
 #-------------------------------------------------------------------------------
-# Tremor (libvorbisidec) — portlib if installed, vendor source otherwise
+# Tremor (libvorbisidec) -- portlib if installed, vendor source otherwise
 #-------------------------------------------------------------------------------
 TREMOR_HDR := $(firstword $(wildcard $(patsubst %,%/include/tremor/ivorbisfile.h,$(PORTLIBS))))
 
 ifeq ($(TREMOR_HDR),)
-  $(info Tremor: portlib not found — building from vendor/tremor/)
+  $(info Tremor: portlib not found -- building from vendor/tremor/)
   TREMOR_SOURCES := vendor/tremor
   TREMOR_LIB     :=
 else
@@ -53,15 +55,17 @@ INCLUDES := src vendor
 # Build flags
 #-------------------------------------------------------------------------------
 CFLAGS   := -g -Wall -Wextra -O2 $(MACHDEP)     \
+            -D_DEFAULT_SOURCE                     \
             -Wno-unused-parameter                 \
             -Wno-missing-field-initializers       \
             -Wno-implicit-fallthrough             \
-            -Wno-maybe-uninitialized
+            -Wno-maybe-uninitialized              \
+            -include $(TOPDIR)/src/platform.h
 
-CXXFLAGS := $(CFLAGS) -std=c++17 -fexceptions -fno-rtti
+CXXFLAGS := $(CFLAGS) -std=c++17 -fno-exceptions -fno-rtti
 
 ASFLAGS  := $(ARCH)
-LDFLAGS   = $(ARCH) $(RPXSPECS) -Wl,-Map,$(notdir $*.map)
+LDFLAGS   = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -fPIE -Wl,-Map,$(notdir $*.map)
 
 LIBS     := -lSDL2_ttf      \
             -lharfbuzz      \
@@ -69,19 +73,19 @@ LIBS     := -lSDL2_ttf      \
             -lpng16         \
             -lbz2           \
             -lSDL2          \
+            -lEGL           \
+            -lglapi         \
+            -ldrm_nouveau   \
             -lcurl          \
-            -lbrotlidec     \
-            -lbrotlicommon  \
             -lmbedtls       \
-            -lmbedcrypto    \
             -lmbedx509      \
+            -lmbedcrypto    \
             -lz             \
             $(TREMOR_LIB)   \
             -logg           \
-            -lwutd          \
-            -lwut
+            -lnx
 
-LIBDIRS  := $(WUT_ROOT) $(PORTLIBS)
+LIBDIRS  := $(LIBNX) $(PORTLIBS)
 
 #-------------------------------------------------------------------------------
 # Two-phase devkitPro build
@@ -91,6 +95,8 @@ ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT  := $(CURDIR)/$(TARGET)
 export TOPDIR  := $(CURDIR)
 export DEPSDIR := $(CURDIR)/$(BUILD)
+
+export NROFLAGS += --icon=$(APP_ICON) --nacp=$(OUTPUT).nacp
 
 CFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(TOPDIR)/$(dir)/*.c)))
 CPPFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(TOPDIR)/$(dir)/*.cpp)))
@@ -117,7 +123,7 @@ $(BUILD):
 
 clean:
 	@echo clean ...
-	@rm -rf $(BUILD) $(TARGET).elf $(TARGET).rpx $(TARGET).wuhb
+	@rm -rf $(BUILD) $(TARGET).elf $(TARGET).nro $(TARGET).nacp
 
 else
 
@@ -125,9 +131,8 @@ CPPFLAGS := $(INCLUDE)
 LD       := $(CXX)
 DEPENDS  := $(OFILES:.o=.d)
 
-$(OUTPUT).wuhb : $(OUTPUT).rpx
-$(OUTPUT).rpx  : $(OUTPUT).elf
-$(OUTPUT).elf  : $(OFILES)
+$(OUTPUT).nro : $(OUTPUT).elf $(OUTPUT).nacp
+$(OUTPUT).elf : $(OFILES)
 
 -include $(DEPENDS)
 

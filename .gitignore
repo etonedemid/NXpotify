@@ -4,10 +4,12 @@ build/
 *.rpx
 *.wuhb
 *.wps
+*.nro
+*.nacp
 *.map
 a.out
 
-# Credentials — never commit
+# Credentials -- never commit
 spotify_saved_creds.bin
 *.bin
 config.mk

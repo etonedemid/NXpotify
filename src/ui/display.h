@@ -2,7 +2,7 @@
 #include <string>
 #include <atomic>
 #include <mutex>
-#include <thread>
+#include <pthread.h>
 #include <vector>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -28,31 +28,34 @@ public:
     void shutdown();
     void render();   // call each frame from main thread
 
-    // Raw SDL objects — valid after init(), null before.
+    // Raw SDL objects -- valid after init(), null before.
     SDL_Renderer *renderer()    const { return tv_ren_; }
     TTF_Font     *font_medium() const { return font_md_; }
     TTF_Font     *font_small()  const { return font_sm_; }
 
     // ── state setters (thread-safe) ──────────────────────────────────────────
-    void set_waiting();      // "Waiting for Spotify…" — ready for a session
-    void set_connecting();   // "Connecting…" — AP connected, dealer not ready yet
+    void set_waiting();      // "Waiting for Spotify…" -- ready for a session
+    void set_connecting();   // "Connecting…" -- AP connected, dealer not ready yet
     void set_ready();        // clears "Connecting…" flag without touching playing state
     void set_error(const std::string &msg);  // show error on the waiting screen
+    // Show QR code login screen.  qr_png may be empty (falls back to text-only).
+    void set_login(const std::string &user_code, const std::vector<uint8_t> &qr_png);
     void set_track(const std::string &title, const std::string &artist,
                    const std::string &album_art_url, bool is_explicit = false);
     void set_progress(int position_ms, int duration_ms, bool playing);
-    void set_volume(int pct);              // 0–100
+    void set_volume(int pct);              // 0-100
     void set_shuffle(bool on);
     void set_repeat(int mode);  // 0=off, 1=repeat-context, 2=repeat-track
-    void set_crystalizer(bool on, int strength);  // strength 1–10
+    void set_crystalizer(bool on, int strength);  // strength 1-10
     void toggle_controls();
     void set_audio(Connect::AudioPipeline *audio);  // non-owning; must outlive Display
+    void set_handheld(bool handheld);  // call each frame; switches layout
 
     // ── Roséverse OLV post card ──────────────────────────────────────────────
     struct OLVPost {
         std::string          body;
         std::string          screen_name;
-        int                  feeling = 0;  // 0–5
+        int                  feeling = 0;  // 0-5
         std::vector<uint8_t> memo;         // raw TGA 320×120 BGRA from lower-left; empty = text-only
     };
     // Pass nullptr to hide the card.
@@ -74,7 +77,8 @@ private:
     // ── rendering ────────────────────────────────────────────────────────────
     void render_to(SDL_Renderer *r, int w, int h);
     void render_waiting(SDL_Renderer *r, int w, int h, bool connecting = false);
-    void render_playing(SDL_Renderer *r, int w, int h);
+    void render_login(SDL_Renderer *r, int w, int h);
+    void render_playing(SDL_Renderer *r, int w, int h, bool handheld = false);
     void render_controls(SDL_Renderer *r, int w, int h);
     void render_olv_card(SDL_Renderer *r, int w, int h);
 
@@ -86,10 +90,10 @@ private:
     static void draw_label(SDL_Renderer *r, const CachedLabel &lbl,
                            int x, int y, int cx = -1);
 
-    // draw text centered at (cx, y)  — kept for controls overlay (not cached)
+    // draw text centered at (cx, y)  -- kept for controls overlay (not cached)
     void draw_centered(SDL_Renderer *r, TTF_Font *f, const char *text,
                        SDL_Color col, int cx, int y);
-    // draw text left-aligned, clipped to max_w  — kept for controls overlay
+    // draw text left-aligned, clipped to max_w  -- kept for controls overlay
     void draw_clipped(SDL_Renderer *r, TTF_Font *f, const char *text,
                       SDL_Color col, int x, int y, int max_w);
     // draw filled rounded rectangle
@@ -121,7 +125,7 @@ private:
     CachedLabel lc_pos_,   lc_dur_;           // M:SS timestamps
     CachedLabel lc_vol_;                      // "Vol N%"
     CachedLabel lc_shuf_,  lc_rep_, lc_xtal_; // SHUF / REP / XTAL (color encodes on/off)
-    CachedLabel lc_bhint_;                    // "B: Controls" — static, baked in init
+    CachedLabel lc_bhint_;                    // "B: Controls" -- static, baked in init
     CachedLabel lc_wait_[2];                  // waiting-screen lines
     CachedLabel lc_olv_header_;               // "Roséverse  @name  :)"
     CachedLabel lc_olv_body_;                 // post body text
@@ -145,13 +149,14 @@ private:
     bool        crystal_enabled_  = false;
     int         crystal_strength_ = 5;
     bool        controls_         = false;
+    bool        handheld_         = false;
     bool        olv_visible_      = false;
     std::string olv_body_;
     std::string olv_header_;  // pre-formatted "@name  :)" line
     // Pending drawing texture (set from any thread under mu_; created on main thread in render())
     std::vector<uint8_t> olv_memo_pending_;
     bool                 olv_memo_dirty_ = false;
-    // Drawing texture — main-thread only, NOT under mu_
+    // Drawing texture -- main-thread only, NOT under mu_
     SDL_Texture         *olv_memo_tex_   = nullptr;
 
     // ── spectrum visualizer ───────────────────────────────────────────────────
@@ -163,7 +168,7 @@ private:
     float      spec_bars_[SPEC_BARS] = {};   // published by worker, read by render
     float      loudness_db_ = -60.0f;        // 15s EMA loudness in dBFS, same lock
 
-    std::thread           spec_thread_;
+    pthread_t             spec_thread_ = 0;
     std::atomic<bool>     spec_stop_{false};
     void spec_worker();                      // defined in display.cpp
 
@@ -171,13 +176,24 @@ private:
     SDL_Texture *art_tex_   = nullptr;
     std::string  art_loaded_url_;   // URL currently in art_tex_
 
-    std::thread      art_thread_;
+    pthread_t        art_thread_ = 0;
     std::atomic<bool> art_stop_{false};
     // art worker reads art_url_ under mu_, signals back via art_pending_*
     std::mutex            art_mu_;
     std::string           art_pending_url_;
     std::vector<uint8_t>  art_pending_data_;
     bool                  art_ready_ = false;
+
+    // ── device auth / QR login ────────────────────────────────────────────────
+    // Protected by mu_:
+    bool        login_     = false;
+    std::string login_code_;
+    // Protected by login_mu_ (set_login may come from device-auth thread):
+    std::mutex            login_mu_;
+    std::vector<uint8_t>  login_qr_pending_;
+    bool                  login_qr_dirty_ = false;
+    // Main-thread only:
+    SDL_Texture          *login_qr_tex_ = nullptr;
 };
 
 } // namespace UI

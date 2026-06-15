@@ -168,7 +168,7 @@ def find_sd_card() -> pathlib.Path | None:
 def main():
     print()
     print("  ╔══════════════════════════════════════════════╗")
-    print("  ║        Spotify Wii U — Setup Tool           ║")
+    print("  ║        Spotify Wii U -- Setup Tool           ║")
     print("  ╚══════════════════════════════════════════════╝")
     print()
 
@@ -215,7 +215,7 @@ def main():
     authenticated_as: list[str] = []
 
     cmd = [str(librespot), "--name", DEVICE_NAME, "--cache", str(cache_dir)]
-    # Suppress audio output errors — we don't need playback
+    # Suppress audio output errors -- we don't need playback
     cmd += ["--backend", "pipe"]
 
     try:
@@ -228,7 +228,7 @@ def main():
         )
     except PermissionError:
         _fail(
-            f"Cannot execute {librespot} — check file permissions.\n"
+            f"Cannot execute {librespot} -- check file permissions.\n"
             f"  Linux/macOS: chmod +x {librespot}"
         )
 
@@ -255,7 +255,7 @@ def main():
         if authenticated_event.is_set():
             break
         if creds_file.exists():
-            # credentials.json written — auth succeeded even if we missed the log line
+            # credentials.json written -- auth succeeded even if we missed the log line
             time.sleep(0.5)  # let librespot finish writing
             break
         time.sleep(0.5)
@@ -301,7 +301,7 @@ def main():
             shutil.copy2(out_file, dest)
             _ok(f"Copied to {dest}")
         else:
-            _info("Skipped — copy manually when ready.")
+            _info("Skipped -- copy manually when ready.")
     else:
         _warn("No SD card detected.")
         _info(f"Copy manually: {out_file.resolve()}  →  SD:/spotify_saved_creds.bin")
@@ -327,5 +327,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n  Interrupted — exiting.")
+        print("\n\n  Interrupted -- exiting.")
         sys.exit(1)

@@ -8,7 +8,7 @@
 #define STBI_NO_STDIO
 #define STBI_ONLY_JPEG
 #define STBI_ONLY_PNG
-#define STBI_NO_THREAD_LOCALS   // Wii U has no TLS support
+#define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
 
 #include <cstdio>
@@ -17,9 +17,9 @@
 #include <algorithm>
 
 #include <curl/curl.h>
-#include <coreinit/time.h>
-#include <coreinit/thread.h>
-#include <whb/log.h>
+
+
+#include "platform.h"
 
 namespace UI {
 
@@ -32,22 +32,22 @@ Display::~Display() { shutdown(); }
 
 bool Display::init(const char *font_path) {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-        WHBLogPrintf("display: SDL_Init failed: %s", SDL_GetError());
+        PLAT_LOGF("display: SDL_Init failed: %s", SDL_GetError());
         return false;
     }
     if (TTF_Init() < 0) {
-        WHBLogPrintf("display: TTF_Init failed: %s", TTF_GetError());
+        PLAT_LOGF("display: TTF_Init failed: %s", TTF_GetError());
         return false;
     }
 
-    tv_win_ = SDL_CreateWindow("Spotify Wii U",
+    tv_win_ = SDL_CreateWindow("NXpotify",
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                 1280, 720, SDL_WINDOW_SHOWN);
-    if (!tv_win_) { WHBLogPrintf("display: TV window: %s", SDL_GetError()); return false; }
+    if (!tv_win_) { PLAT_LOGF("display: TV window: %s", SDL_GetError()); return false; }
 
     tv_ren_ = SDL_CreateRenderer(tv_win_, -1,
                                   SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!tv_ren_) { WHBLogPrintf("display: TV renderer: %s", SDL_GetError()); return false; }
+    if (!tv_ren_) { PLAT_LOGF("display: TV renderer: %s", SDL_GetError()); return false; }
 
     // Try file path first; fall back to the font embedded in the binary.
     auto open_font = [&](int pt) -> TTF_Font * {
@@ -64,7 +64,7 @@ bool Display::init(const char *font_path) {
     font_sm_    = open_font(18);
 
     if (!font_title_ || !font_lg_)
-        WHBLogPrintf("display: font load failed: %s", TTF_GetError());
+        PLAT_LOGF("display: font load failed: %s", TTF_GetError());
 
     // Pre-bake the background gradient into a 2×720 static texture.
     // SDL_RenderCopy will stretch it to fill the screen each frame,
@@ -80,10 +80,14 @@ bool Display::init(const char *font_path) {
             0xFF000000u, 0x00FF0000u, 0x0000FF00u, 0x000000FFu);
         if (s) {
             for (int y = 0; y < GH; ++y) {
+                // Power curve (exponent 3): top ~60% stays near gray,
+                // green bleeds in only toward the bottom.
+                float frac = (float)y / GH;
+                frac = frac * frac * frac;
                 uint32_t px = SDL_MapRGBA(s->format,
-                    (uint8_t)((int)t.r + dr * y / GH),
-                    (uint8_t)((int)t.g + dg * y / GH),
-                    (uint8_t)((int)t.b + db * y / GH), 255);
+                    (uint8_t)((int)t.r + (int)(dr * frac)),
+                    (uint8_t)((int)t.g + (int)(dg * frac)),
+                    (uint8_t)((int)t.b + (int)(db * frac)), 255);
                 uint32_t *row = (uint32_t *)((uint8_t *)s->pixels + y * s->pitch);
                 row[0] = row[1] = px;
             }
@@ -97,21 +101,25 @@ bool Display::init(const char *font_path) {
         update_label(lc_bhint_, tv_ren_, font_sm_, "B: Controls", Theme::TEXT_HINT);
 
     art_stop_.store(false);
-    art_thread_ = std::thread(&Display::art_worker, this);
+    { pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1024*1024);
+      pthread_create(&art_thread_, &a, [](void *v) -> void* { static_cast<Display*>(v)->art_worker(); return nullptr; }, this);
+      pthread_attr_destroy(&a); }
 
     spec_stop_.store(false);
-    spec_thread_ = std::thread(&Display::spec_worker, this);
+    { pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1024*1024);
+      pthread_create(&spec_thread_, &a, [](void *v) -> void* { static_cast<Display*>(v)->spec_worker(); return nullptr; }, this);
+      pthread_attr_destroy(&a); }
 
-    WHBLogPrint("display: OK");
+    PLAT_LOG("display: OK");
     return true;
 }
 
 void Display::shutdown() {
     spec_stop_.store(true);
-    if (spec_thread_.joinable()) spec_thread_.join();
+    if (spec_thread_) { pthread_join(spec_thread_, nullptr); spec_thread_ = 0; }
 
     art_stop_.store(true);
-    if (art_thread_.joinable()) art_thread_.join();
+    if (art_thread_) { pthread_join(art_thread_, nullptr); art_thread_ = 0; }
 
     lc_title_.free(); lc_artist_.free();
     lc_pos_.free();   lc_dur_.free();   lc_vol_.free();
@@ -120,7 +128,8 @@ void Display::shutdown() {
     lc_olv_header_.free(); lc_olv_body_.free();
     if (bg_tex_)       { SDL_DestroyTexture(bg_tex_);       bg_tex_       = nullptr; }
     if (art_tex_)      { SDL_DestroyTexture(art_tex_);      art_tex_      = nullptr; }
-    if (olv_memo_tex_) { SDL_DestroyTexture(olv_memo_tex_); olv_memo_tex_ = nullptr; }
+    if (olv_memo_tex_)  { SDL_DestroyTexture(olv_memo_tex_);  olv_memo_tex_  = nullptr; }
+    if (login_qr_tex_)  { SDL_DestroyTexture(login_qr_tex_);  login_qr_tex_  = nullptr; }
     if (font_sm_)    TTF_CloseFont(font_sm_);
     if (font_md_)    TTF_CloseFont(font_md_);
     if (font_lg_)    TTF_CloseFont(font_lg_);
@@ -139,6 +148,7 @@ void Display::set_waiting() {
     std::lock_guard<std::mutex> lk(mu_);
     waiting_ = true;
     connecting_ = false;
+    login_ = false;
     error_msg_.clear();
     title_ = artist_ = art_url_ = "";
     pos_ms_ = dur_ms_ = 0; playing_ = false;
@@ -148,6 +158,7 @@ void Display::set_connecting() {
     std::lock_guard<std::mutex> lk(mu_);
     waiting_ = true;
     connecting_ = true;
+    login_ = false;
     error_msg_.clear();
     title_ = artist_ = art_url_ = "";
     pos_ms_ = dur_ms_ = 0; playing_ = false;
@@ -156,16 +167,31 @@ void Display::set_connecting() {
 void Display::set_ready() {
     std::lock_guard<std::mutex> lk(mu_);
     connecting_ = false;
-    // Don't touch waiting_/title_/etc — music may already be playing.
+    // Don't touch waiting_/title_/etc -- music may already be playing.
 }
 
 void Display::set_error(const std::string &msg) {
     std::lock_guard<std::mutex> lk(mu_);
     waiting_ = true;
     connecting_ = false;
+    login_ = false;
     error_msg_ = msg;
     title_ = artist_ = art_url_ = "";
     pos_ms_ = dur_ms_ = 0; playing_ = false;
+}
+
+void Display::set_login(const std::string &user_code, const std::vector<uint8_t> &qr_png) {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        login_      = true;
+        waiting_    = false;
+        login_code_ = user_code;
+    }
+    {
+        std::lock_guard<std::mutex> lk(login_mu_);
+        login_qr_pending_ = qr_png;
+        login_qr_dirty_   = true;
+    }
 }
 
 void Display::set_track(const std::string &title, const std::string &artist,
@@ -253,11 +279,11 @@ void Display::render() {
                     art_tex_ = SDL_CreateTextureFromSurface(tv_ren_, surf);
                     SDL_FreeSurface(surf);
                     art_loaded_url_ = art_pending_url_;
-                    WHBLogPrintf("display: art loaded %dx%d", iw, ih);
+                    PLAT_LOGF("display: art loaded %dx%d", iw, ih);
                 }
                 stbi_image_free(px);
             } else {
-                WHBLogPrintf("display: art decode failed: %s", stbi_failure_reason());
+                PLAT_LOGF("display: art decode failed: %s", stbi_failure_reason());
             }
             art_pending_data_.clear();
             art_ready_ = false;
@@ -297,8 +323,42 @@ void Display::render() {
                     if (surf) {
                         olv_memo_tex_ = SDL_CreateTextureFromSurface(tv_ren_, surf);
                         SDL_FreeSurface(surf);
-                        WHBLogPrint("display: olv drawing loaded");
+                        PLAT_LOG("display: olv drawing loaded");
                     }
+                }
+            }
+        }
+    }
+
+    // Upload pending QR code texture (GPU ops must be on main thread)
+    {
+        bool dirty = false;
+        std::vector<uint8_t> qr_data;
+        {
+            std::lock_guard<std::mutex> lk(login_mu_);
+            if (login_qr_dirty_) {
+                login_qr_dirty_ = false;
+                dirty           = true;
+                qr_data         = std::move(login_qr_pending_);
+            }
+        }
+        if (dirty && tv_ren_) {
+            if (login_qr_tex_) { SDL_DestroyTexture(login_qr_tex_); login_qr_tex_ = nullptr; }
+            if (!qr_data.empty()) {
+                int iw, ih, ch;
+                unsigned char *px = stbi_load_from_memory(qr_data.data(), (int)qr_data.size(),
+                                                           &iw, &ih, &ch, 4);
+                if (px) {
+                    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
+                        px, iw, ih, 32, iw * 4, SDL_PIXELFORMAT_RGBA32);
+                    if (surf) {
+                        login_qr_tex_ = SDL_CreateTextureFromSurface(tv_ren_, surf);
+                        SDL_FreeSurface(surf);
+                        PLAT_LOGF("display: QR loaded %dx%d", iw, ih);
+                    }
+                    stbi_image_free(px);
+                } else {
+                    PLAT_LOGF("display: QR decode failed: %s", stbi_failure_reason());
                 }
             }
         }
@@ -308,6 +368,10 @@ void Display::render() {
 }
 
 void Display::set_audio(Connect::AudioPipeline *audio) { audio_src_ = audio; }
+
+void Display::set_handheld(bool handheld) {
+    std::lock_guard<std::mutex> lk(mu_); handheld_ = handheld;
+}
 
 // ── Spectrum helpers ──────────────────────────────────────────────────────────
 
@@ -367,7 +431,7 @@ bool Display::update_label(CachedLabel &lbl, SDL_Renderer *r, TTF_Font *f,
         if (tw > max_w) {
             while (t.size() > 1) {
                 t.pop_back();
-                std::string cand = t + "\xe2\x80\xa6";
+                std::string cand = t + "...";
                 TTF_SizeUTF8(f, cand.c_str(), &tw, &th);
                 if (tw <= max_w) { t = std::move(cand); break; }
             }
@@ -392,14 +456,18 @@ void Display::draw_label(SDL_Renderer *r, const CachedLabel &lbl, int x, int y, 
 // Snapshots state under mu_, then renders while NOT holding the lock.
 
 void Display::render_to(SDL_Renderer *r, int w, int h) {
-    bool snap_waiting, snap_connecting, snap_controls, snap_olv;
+    bool snap_waiting, snap_connecting, snap_controls, snap_olv, snap_login, snap_handheld;
+    std::string snap_login_code;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        snap_waiting   = waiting_;
+        snap_waiting    = waiting_;
         snap_connecting = connecting_;
-        snap_controls  = controls_;
-        snap_olv       = olv_visible_;
-        snap_error_    = error_msg_;
+        snap_controls   = controls_;
+        snap_olv        = olv_visible_;
+        snap_error_     = error_msg_;
+        snap_login      = login_;
+        snap_login_code = login_code_;
+        snap_handheld   = handheld_;
     }
 
     if (bg_tex_) {
@@ -409,12 +477,58 @@ void Display::render_to(SDL_Renderer *r, int w, int h) {
         SDL_RenderClear(r);
     }
 
-    if      (snap_controls) render_controls(r, w, h);
+    if      (snap_login)    render_login(r, w, h);
+    else if (snap_controls) render_controls(r, w, h);
     else if (snap_waiting)  render_waiting(r, w, h, snap_connecting);
-    else                    render_playing(r, w, h);
+    else                    render_playing(r, w, h, snap_handheld);
 
     // OLV card overlays the bottom strip when visible (independent of controls/waiting)
-    if (snap_olv && !snap_controls) render_olv_card(r, w, h);
+    if (snap_olv && !snap_controls && !snap_login) render_olv_card(r, w, h);
+}
+
+void Display::render_login(SDL_Renderer *r, int w, int h) {
+    // Snapshot login code (already done in render_to via snap_login_code, but
+    // we need it here - read under mu_ is safe since render_to already snapped)
+    std::string code;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        code = login_code_;
+    }
+
+    float s = w / 1280.0f;
+    auto S  = [&](int v) { return (int)(v * s); };
+
+    draw_centered(r, font_lg_, "Connect your Spotify account", Theme::TEXT, w / 2, S(60));
+
+    // QR code image -- centered horizontally, upper half of screen
+    constexpr int QR_SIZE = 300;
+    int qr_x = w / 2 - S(QR_SIZE) / 2;
+    int qr_y = S(120);
+    if (login_qr_tex_) {
+        // White background so QR is scannable regardless of gradient
+        SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+        SDL_Rect bg_r = { qr_x - S(8), qr_y - S(8), S(QR_SIZE + 16), S(QR_SIZE + 16) };
+        SDL_RenderFillRect(r, &bg_r);
+        SDL_Rect dst  = { qr_x, qr_y, S(QR_SIZE), S(QR_SIZE) };
+        SDL_RenderCopy(r, login_qr_tex_, nullptr, &dst);
+    } else {
+        // Fallback box while QR is loading
+        SDL_SetRenderDrawColor(r, 60, 60, 60, 255);
+        SDL_Rect box = { qr_x, qr_y, S(QR_SIZE), S(QR_SIZE) };
+        SDL_RenderFillRect(r, &box);
+        draw_centered(r, font_md_, "Loading QR...", Theme::TEXT_DIM, w / 2, qr_y + S(QR_SIZE) / 2 - S(12));
+    }
+
+    // User code
+    if (!code.empty()) {
+        std::string label = "Code:  " + code;
+        draw_centered(r, font_lg_, label.c_str(), Theme::ACCENT, w / 2, qr_y + S(QR_SIZE) + S(24));
+    }
+
+    draw_centered(r, font_md_, "Scan with phone or visit spotify.com/pair",
+                  Theme::TEXT_DIM, w / 2, qr_y + S(QR_SIZE) + S(72));
+    draw_centered(r, font_sm_, "One-time setup -- you won't need to do this again",
+                  Theme::TEXT_HINT, w / 2, qr_y + S(QR_SIZE) + S(108));
 }
 
 void Display::render_waiting(SDL_Renderer *r, int w, int h, bool connecting) {
@@ -422,15 +536,15 @@ void Display::render_waiting(SDL_Renderer *r, int w, int h, bool connecting) {
         constexpr SDL_Color WARN = {220, 80, 40, 255};
         update_label(lc_wait_[0], r, font_lg_, snap_error_.c_str(), WARN);
         update_label(lc_wait_[1], r, font_md_,
-                     "spotify-wiiu.nicochristmann.net", Theme::TEXT_HINT);
+                     "Open Spotify and select this device again", Theme::TEXT_HINT);
     } else if (connecting) {
         update_label(lc_wait_[0], r, font_lg_,
-                     "Connecting\xe2\x80\xa6", Theme::TEXT_DIM);
+                     "Connecting...", Theme::TEXT_DIM);
         update_label(lc_wait_[1], r, font_md_,
                      "Please wait", Theme::TEXT_HINT);
     } else {
         update_label(lc_wait_[0], r, font_lg_,
-                     "Waiting for Spotify\xe2\x80\xa6", Theme::TEXT_DIM);
+                     "Waiting for Spotify...", Theme::TEXT_DIM);
         update_label(lc_wait_[1], r, font_md_,
                      "Open Spotify and select this device", Theme::TEXT_HINT);
     }
@@ -497,7 +611,7 @@ void Display::render_controls(SDL_Renderer *r, int w, int h) {
         }
     }
 
-    // Cache size footer — populated after first GC sweep (~startup).
+    // Cache size footer -- populated after first GC sweep (~startup).
     if (audio_src_) {
         int64_t cb = audio_src_->cache_total_bytes();
         if (cb >= 0) {
@@ -514,30 +628,29 @@ void Display::render_controls(SDL_Renderer *r, int w, int h) {
     draw_centered(r, font_sm_, "Press B to close", Theme::TEXT_HINT, w / 2, h - S(40));
 }
 
-void Display::render_playing(SDL_Renderer *r, int w, int h) {
-    // Snapshot all needed display state
+void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
     std::string title, artist;
     int pos_ms, dur_ms, volume;
     bool playing, shuffle, xtal_on, is_explicit;
     int  repeat_mode, xtal_str;
-    SDL_Texture *art = art_tex_;  // main-thread only; no lock needed
+    SDL_Texture *art = art_tex_;
 
     {
         std::lock_guard<std::mutex> lk(mu_);
-        title    = title_;
-        artist   = artist_;
-        pos_ms   = pos_ms_;
-        dur_ms   = dur_ms_;
-        playing  = playing_;
-        volume   = volume_;
+        title       = title_;
+        artist      = artist_;
+        pos_ms      = pos_ms_;
+        dur_ms      = dur_ms_;
+        playing     = playing_;
+        volume      = volume_;
         shuffle     = shuffle_;
         repeat_mode = repeat_mode_;
-        xtal_on  = crystal_enabled_;
-        xtal_str = crystal_strength_;
+        xtal_on     = crystal_enabled_;
+        xtal_str    = crystal_strength_;
         is_explicit = explicit_;
     }
 
-    float s = w / 1280.0f;  // scale factor
+    float s = w / 1280.0f;
     auto S  = [&](int v) { return (int)(v * s); };
 
     // ── Album art ─────────────────────────────────────────────────────────────
@@ -548,34 +661,32 @@ void Display::render_playing(SDL_Renderer *r, int w, int h) {
     } else {
         fill_rounded(r, ax, ay, asz, asz, S(10), Theme::ART_FILL);
         if (!artist.empty()) {
-            char ch[5] = {artist[0], '\0'};
+            char ch[2] = {artist[0], '\0'};
             draw_centered(r, font_title_, ch, Theme::TEXT_DIM,
                           ax + asz / 2, ay + asz / 2 - S(18));
         }
     }
 
-    // ── Track text ────────────────────────────────────────────────────────────
+    // ── Track info: artist (small/dim) above title (large/white) ─────────────
     int tx = S(Theme::TEXT_X);
-    int mw = w - tx - S(40);
-    update_label(lc_title_,  r, font_title_, title.c_str(),  Theme::TEXT,     mw);
-    update_label(lc_artist_, r, font_lg_,    artist.c_str(), Theme::TEXT_DIM, mw);
-    draw_label(r, lc_title_,  tx, S(Theme::TITLE_Y));
+    int tlabel_w = w - tx - S(40);
+    update_label(lc_artist_, r, font_lg_,    artist.c_str(), Theme::TEXT_DIM, tlabel_w);
+    update_label(lc_title_,  r, font_title_, title.c_str(),  Theme::TEXT,     tlabel_w);
     draw_label(r, lc_artist_, tx, S(Theme::ARTIST_Y));
+    draw_label(r, lc_title_,  tx, S(Theme::TITLE_Y));
 
     if (is_explicit) {
-        // Small "E" pill badge to the right of the artist name, same baseline
         update_label(lc_expl_, r, font_sm_, "E", Theme::TEXT);
         int bpad = S(5);
-        int bw   = lc_expl_.w + bpad * 2;
-        int bh   = lc_expl_.h + S(2);
-        int bx   = tx + lc_artist_.w + S(10);
-        int by   = S(Theme::ARTIST_Y) + (lc_artist_.h - bh) / 2;
-        fill_rounded(r, bx, by, bw, bh, S(3), SDL_Color{77, 77, 77, 220});
-        draw_label(r, lc_expl_, bx + bpad, by + S(1));
+        int ebw  = lc_expl_.w + bpad * 2;
+        int ebh  = lc_expl_.h + S(2);
+        int ebx  = tx + lc_artist_.w + S(10);
+        int eby  = S(Theme::ARTIST_Y) + (lc_artist_.h - ebh) / 2;
+        fill_rounded(r, ebx, eby, ebw, ebh, S(3), SDL_Color{77, 77, 77, 220});
+        draw_label(r, lc_expl_, ebx + bpad, eby + S(1));
     }
 
-    // ── Spectrum visualizer ───────────────────────────────────────────────────
-    // Bar heights are computed by spec_worker (CPU0, 30 Hz); just draw here.
+    // ── Spectrum visualizer (right column, rises from just above bar) ─────────
     if (audio_src_) {
         float bars[SPEC_BARS];
         float loudness_db;
@@ -585,129 +696,148 @@ void Display::render_playing(SDL_Renderer *r, int w, int h) {
             loudness_db = loudness_db_;
         }
 
-        // ── Loudness meter (15s EMA, dBFS) ───────────────────────────────────
-        {
-            // Sit flush against the right side, starting after the album art.
-            // Bottom edge aligned with the art's bottom line (ART_Y + ART_SIZE).
-            int mx     = S(Theme::TEXT_X);
-            int mx_end = S(Theme::ART_X + 1200);  // same right edge as visualizer
-            int mw     = mx_end - mx;
-            int mh     = S(20);
-            int my     = S(Theme::ART_Y + Theme::ART_SIZE) - mh;
-
-            // Description + dBFS reading on the line above the bar
-            char db_buf[16];
-            snprintf(db_buf, sizeof(db_buf), "%.0f dBFS", loudness_db);
-            draw_clipped(r, font_sm_, "Average Loudness (15s)", Theme::TEXT_DIM,
-                         mx, my - S(24), mw - S(80));
-            draw_clipped(r, font_sm_, db_buf, Theme::TEXT_HINT,
-                         mx_end - S(78), my - S(24), S(78));
-
-            // Track background
-            SDL_SetRenderDrawColor(r, 30, 30, 30, 255);
-            SDL_Rect bg = { mx, my, mw, mh };
-            SDL_RenderFillRect(r, &bg);
-
-            // Fill: map [-60, 0] dBFS → [0, mw], colour green→yellow→red
-            float t = (loudness_db + 60.0f) / 60.0f;  // 0=silent, 1=0dBFS
-            t = std::max(0.0f, std::min(1.0f, t));
-            int fill_w = (int)(t * mw);
-            if (fill_w > 0) {
-                float hue = 120.0f * (1.0f - t);  // 120°=green → 0°=red
-                SDL_Color fc = hsv_to_sdl(hue, 0.85f, 0.88f);
-                SDL_SetRenderDrawColor(r, fc.r, fc.g, fc.b, 255);
-                SDL_Rect fill = { mx, my, fill_w, mh };
-                SDL_RenderFillRect(r, &fill);
-            }
-        }
-
-        int vis_x   = S(40);
-        int vis_bot = S(565);
-        int vis_h   = S(130);
-        int slot_w  = S(1200) / SPEC_BARS;
-        int gap     = std::max(1, S(1));
+        int vis_left  = S(Theme::TEXT_X);
+        int vis_right = S(Theme::BAR_X + Theme::BAR_W);
+        int vis_w     = vis_right - vis_left;
+        int vis_bot   = S(Theme::BAR_Y) - S(10);
+        int vis_h     = S(110);
+        int slot_w    = vis_w / SPEC_BARS;
+        int gap       = std::max(1, S(1));
         for (int b = 0; b < SPEC_BARS; ++b) {
             float norm  = std::min(1.0f, bars[b] / 0.25f);
-            int   bar_h = (int)(norm * vis_h);
-            if (bar_h < 1) continue;
-            float hue        = (float)b / (SPEC_BARS - 1) * 270.0f;
-            SDL_Color col    = hsv_to_sdl(hue, 0.85f, 0.90f);
+            int   bh_v  = (int)(norm * vis_h);
+            if (bh_v < 1) continue;
+            float hue     = (float)b / (SPEC_BARS - 1) * 270.0f;
+            SDL_Color col = hsv_to_sdl(hue, 0.85f, 0.90f);
             SDL_SetRenderDrawColor(r, col.r, col.g, col.b, 255);
-            SDL_Rect rect = { vis_x + b * slot_w, vis_bot - bar_h,
-                              slot_w - gap, bar_h };
+            SDL_Rect rect = { vis_left + b * slot_w, vis_bot - bh_v, slot_w - gap, bh_v };
             SDL_RenderFillRect(r, &rect);
         }
+
+        char db_buf[16];
+        snprintf(db_buf, sizeof(db_buf), "%.0f dBFS", loudness_db);
+        draw_clipped(r, font_sm_, db_buf, Theme::TEXT_HINT,
+                     vis_right - S(78), S(Theme::ARTIST_Y), S(78));
     }
 
     // ── Progress bar ─────────────────────────────────────────────────────────
-    int bx = S(Theme::BAR_X), by = S(Theme::BAR_Y);
+    int bx = S(Theme::BAR_X), by_bar = S(Theme::BAR_Y);
     int bw = S(Theme::BAR_W), bh = S(Theme::BAR_H);
 
-    fill_rounded(r, bx, by, bw, bh, bh / 2, Theme::BAR_BG);
+    fill_rounded(r, bx, by_bar, bw, bh, bh / 2, Theme::BAR_BG);
     if (dur_ms > 0) {
         int filled = (int)((int64_t)pos_ms * bw / dur_ms);
-        fill_rounded(r, bx, by, std::min(filled, bw), bh, bh / 2, Theme::ACCENT);
+        fill_rounded(r, bx, by_bar, std::min(filled, bw), bh, bh / 2, Theme::ACCENT);
     }
 
     char t_pos[16], t_dur[16];
     auto fmt = [](int ms, char *buf, size_t n) {
-        int s = ms / 1000, m = s / 60; s %= 60;
-        snprintf(buf, n, "%d:%02d", m, s);
+        int sec = ms / 1000, m = sec / 60; sec %= 60;
+        snprintf(buf, n, "%d:%02d", m, sec);
     };
     fmt(pos_ms, t_pos, sizeof(t_pos)); fmt(dur_ms, t_dur, sizeof(t_dur));
     update_label(lc_pos_, r, font_sm_, t_pos, Theme::TEXT_DIM);
     update_label(lc_dur_, r, font_sm_, t_dur, Theme::TEXT_DIM);
-    draw_label(r, lc_pos_, bx,              by + bh + S(4));
-    draw_label(r, lc_dur_, bx + bw - S(50), by + bh + S(4));
+    draw_label(r, lc_pos_, bx,              by_bar + bh + S(4));
+    draw_label(r, lc_dur_, bx + bw - S(50), by_bar + bh + S(4));
 
-    // ── Play indicator ────────────────────────────────────────────────────────
+    // ── Transport controls (drawn icons centered below bar) ───────────────────
     {
         const SDL_Color &ac = Theme::ACCENT;
-        SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, ac.a);
-        int cx = bx + (bw - S(50)) / 2;  // midpoint between pos and dur label anchors
-        int cy = by + bh + S(50);
+        SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 255);
+        int cy    = S(Theme::TRANSPORT_Y);
+        int cx    = w / 2;
+        int igap  = S(80);   // distance from play center to prev/next center
 
+        // Play / Pause at center
         if (playing) {
-            // ▶  right-pointing filled triangle, scanline-filled
-            int H = S(20), W = S(36);
-            int lx = cx - W / 2, rx = cx + W / 2;
-            for (int dy = -H; dy <= H; ++dy) {
-                int ex = (dy <= 0) ? lx + (dy + H) * W / H
-                                   : rx  - dy       * W / H;
-                SDL_RenderDrawLine(r, lx, cy + dy, ex, cy + dy);
-            }
-        } else {
-            // ⏸  two filled rectangles
-            int bw2  = S(12), bh2 = S(38), half = S(5);
+            int bw2 = S(11), bh2 = S(34), half = S(5);
             SDL_Rect lb = {cx - half - bw2, cy - bh2 / 2, bw2, bh2};
             SDL_Rect rb = {cx + half,       cy - bh2 / 2, bw2, bh2};
             SDL_RenderFillRect(r, &lb);
             SDL_RenderFillRect(r, &rb);
+        } else {
+            int H = S(18), W = S(32);
+            int lx2 = cx - W / 2, rx2 = cx + W / 2;
+            for (int dy = -H; dy <= H; ++dy) {
+                int ex = (dy <= 0) ? lx2 + (dy + H) * W / H : rx2 - dy * W / H;
+                SDL_RenderDrawLine(r, lx2, cy + dy, ex, cy + dy);
+            }
+        }
+
+        // Skip-back (|<) at cx - igap: vertical bar then left-pointing triangle
+        {
+            int px = cx - igap;
+            int H  = S(14), W = S(20);
+            int bw3 = S(4);
+            // left-pointing triangle, right edge (base) at px + W/2
+            int rx2 = px + (W + bw3) / 2;
+            int lx2 = rx2 - W;
+            for (int dy = -H; dy <= H; ++dy) {
+                int ex = (dy <= 0) ? rx2 - (dy + H) * W / H : lx2 + dy * W / H;
+                SDL_RenderDrawLine(r, ex, cy + dy, rx2, cy + dy);
+            }
+            // vertical bar to the left of the triangle
+            SDL_Rect vb = { px - (W + bw3) / 2, cy - H, bw3, H * 2 };
+            SDL_RenderFillRect(r, &vb);
+        }
+
+        // Skip-forward (>|) at cx + igap: right-pointing triangle then vertical bar
+        {
+            int px = cx + igap;
+            int H  = S(14), W = S(20);
+            int bw3 = S(4);
+            // right-pointing triangle, left edge (base) at px - (W + bw3)/2
+            int lx2 = px - (W + bw3) / 2;
+            int rx2 = lx2 + W;
+            for (int dy = -H; dy <= H; ++dy) {
+                int ex = (dy <= 0) ? lx2 + (dy + H) * W / H : rx2 - dy * W / H;
+                SDL_RenderDrawLine(r, lx2, cy + dy, ex, cy + dy);
+            }
+            // vertical bar to the right of the triangle
+            SDL_Rect vb = { px + (W + bw3) / 2 - bw3, cy - H, bw3, H * 2 };
+            SDL_RenderFillRect(r, &vb);
         }
     }
 
-    // ── Volume ────────────────────────────────────────────────────────────────
-    char vol[16]; snprintf(vol, sizeof(vol), "Vol %d%%", volume);
-    update_label(lc_vol_, r, font_sm_, vol, Theme::TEXT_DIM);
-    draw_label(r, lc_vol_, w - S(80), S(12));
+    // ── Status row: SHUF / REP / VOL / XTAL centered at STATUS_Y ────────────
+    {
+        SDL_Color shuf_col = shuffle     ? Theme::ACCENT : Theme::TEXT_HINT;
+        SDL_Color rep_col  = repeat_mode ? Theme::ACCENT : Theme::TEXT_HINT;
+        char xtal_buf[12];
+        if (xtal_on) snprintf(xtal_buf, sizeof(xtal_buf), "XTAL %d", xtal_str);
+        else         snprintf(xtal_buf, sizeof(xtal_buf), "XTAL");
+        SDL_Color xtal_col = xtal_on ? Theme::ACCENT : Theme::TEXT_HINT;
+        char vol_buf[12]; snprintf(vol_buf, sizeof(vol_buf), "VOL %d%%", volume);
 
-    // ── Shuffle / Repeat indicators ───────────────────────────────────────────
-    SDL_Color shuf_col = shuffle       ? Theme::ACCENT : Theme::TEXT_HINT;
-    SDL_Color rep_col  = repeat_mode   ? Theme::ACCENT : Theme::TEXT_HINT;
-    char xtal_str_buf[12];
-    if (xtal_on) snprintf(xtal_str_buf, sizeof(xtal_str_buf), "XTAL %d", xtal_str);
-    else         snprintf(xtal_str_buf, sizeof(xtal_str_buf), "XTAL");
-    SDL_Color xtal_col = xtal_on ? Theme::ACCENT : Theme::TEXT_HINT;
+        update_label(lc_shuf_, r, font_sm_, "SHUF", shuf_col);
+        update_label(lc_rep_,  r, font_sm_, repeat_mode == 2 ? "REP1" : "REP", rep_col);
+        update_label(lc_xtal_, r, font_sm_, xtal_buf, xtal_col);
+        update_label(lc_vol_,  r, font_sm_, vol_buf, Theme::TEXT_DIM);
 
-    update_label(lc_shuf_, r, font_sm_, "SHUF", shuf_col);
-    update_label(lc_rep_,  r, font_sm_, repeat_mode == 2 ? "REP1" : "REP", rep_col);
-    update_label(lc_xtal_, r, font_sm_, xtal_str_buf, xtal_col);
-    draw_label(r, lc_shuf_, S(40),  S(12));
-    draw_label(r, lc_rep_,  S(110), S(12));
-    draw_label(r, lc_xtal_, S(170), S(12));
+        int sy = S(Theme::STATUS_Y);
+        int sp = S(20);
+        int total = lc_shuf_.w + lc_rep_.w + lc_vol_.w + lc_xtal_.w + sp * 3;
+        int sx = (w - total) / 2;
+        draw_label(r, lc_shuf_, sx, sy); sx += lc_shuf_.w + sp;
+        draw_label(r, lc_rep_,  sx, sy); sx += lc_rep_.w  + sp;
+        draw_label(r, lc_vol_,  sx, sy); sx += lc_vol_.w  + sp;
+        draw_label(r, lc_xtal_, sx, sy);
+    }
 
-    // ── Controls hint ─────────────────────────────────────────────────────────
-    draw_label(r, lc_bhint_, w / 2 - S(55), S(12));
+    // ── Handheld: permanent button hint strip at bottom ───────────────────────
+    if (handheld) {
+        int strip_h = S(30);
+        int strip_y = h - strip_h;
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(r, 0, 0, 0, 160);
+        SDL_Rect strip = {0, strip_y, w, strip_h};
+        SDL_RenderFillRect(r, &strip);
+        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+        draw_centered(r, font_sm_,
+            "A: Play/Pause   L: Prev   R: Next   +/-: Vol   B: Controls",
+            Theme::TEXT_HINT, w / 2, strip_y + (strip_h - S(18)) / 2);
+    }
 }
 
 // ── Drawing primitives ────────────────────────────────────────────────────────
@@ -734,7 +864,7 @@ void Display::draw_clipped(SDL_Renderer *r, TTF_Font *f, const char *text,
     if (tw > max_w) {
         while (str.size() > 1) {
             str.pop_back();
-            std::string cand = str + "\xe2\x80\xa6";  // …
+            std::string cand = str + "...";  // ...
             TTF_SizeUTF8(f, cand.c_str(), &tw, &th);
             if (tw <= max_w) { str = std::move(cand); break; }
         }
@@ -785,7 +915,7 @@ void Display::fill_rounded(SDL_Renderer *r, int x, int y, int w, int h,
 // The render thread never calls into this code; it only copies spec_bars_.
 
 void Display::spec_worker() {
-    OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
+    ;
 
     static constexpr int   FFT_N = 1024;
     static constexpr float SR    = 44100.0f;
@@ -823,7 +953,7 @@ void Display::spec_worker() {
     float loud_avg = 1e-6f;  // initialise to near-silence
 
     while (!spec_stop_.load()) {
-        OSSleepTicks(OSMillisecondsToTicks(16));   // ~60 Hz
+        plat_sleep_ms(16);   // ~60 Hz
 
         if (!audio_src_) continue;
 
@@ -872,18 +1002,18 @@ size_t Display::curl_write(char *ptr, size_t sz, size_t n, void *ud) {
 }
 
 void Display::art_worker() {
-    OSSetThreadAffinity(OSGetCurrentThread(), OS_THREAD_ATTRIB_AFFINITY_CPU0);
+    ;
     std::string last_url;
     while (!art_stop_.load()) {
         std::string url;
         { std::lock_guard<std::mutex> lk(mu_); url = art_url_; }
 
         if (url.empty() || url == last_url || url == art_loaded_url_) {
-            OSSleepTicks(OSMillisecondsToTicks(200));
+            plat_sleep_ms(200);
             continue;
         }
         last_url = url;
-        WHBLogPrintf("display: art fetch %s", url.c_str());
+        PLAT_LOGF("display: art fetch %s", url.c_str());
 
         std::vector<uint8_t> data;
         CURL *curl = curl_easy_init();
@@ -953,7 +1083,7 @@ void Display::render_olv_card(SDL_Renderer *r, int w, int h) {
     const int mw = card_w - S(16);
     int cy = card_y + S(6);
 
-    // Header: "Miiverse  @name  :)" — accent colour, small font
+    // Header: "Miiverse  @name  :)" -- accent colour, small font
     if (font_sm_) {
         std::string full_hdr = "Miiverse  " + hdr;
         update_label(lc_olv_header_, r, font_sm_, full_hdr.c_str(), Theme::ACCENT, mw);
@@ -968,7 +1098,7 @@ void Display::render_olv_card(SDL_Renderer *r, int w, int h) {
         cy += draw_h + S(4);
     }
 
-    // Body text — white, medium font, truncated to card width
+    // Body text -- white, medium font, truncated to card width
     if (font_md_ && !body.empty()) {
         update_label(lc_olv_body_, r, font_md_, body.c_str(), Theme::TEXT, mw);
         draw_label(r, lc_olv_body_, tx, cy);
