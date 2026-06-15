@@ -6,7 +6,7 @@ An unofficial [Spotify Connect](https://www.spotify.com/connect/) client for the
 > Not affiliated with or endorsed by Spotify AB.
 
 ![NXpotify login](screenshot-1.jpg)
-
+<img width="1280" height="720" alt="2026061511193500-9B58DE145B4A9B8A7451479606CF81B9" src="https://github.com/user-attachments/assets/7fc12083-f7da-4208-8571-de8fbc8660b1" />
 ### Credential tool (optional)
 
 If zeroconf discovery does not work on your network, you can generate credentials manually with librespot:
