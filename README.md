@@ -6,8 +6,13 @@ Based on https://github.com/Happynico7504/spotify-wiiu
 > **Requires a Spotify Premium account.**
 > Not affiliated with or endorsed by Spotify AB.
 
+Tap the cover art to pause, swipe right to skip, left to rewind, tap on timeline to skip to the segment. 
+
+Enjoy!
+
 ![NXpotify now-playing screen](screenshot-1.jpg)
-<img width="1280" height="720" alt="2026061511193500-9B58DE145B4A9B8A7451479606CF81B9" src="https://github.com/user-attachments/assets/b4754734-52a0-4def-9025-7e8d8868ae6a" />
+<img width="1280" height="720" alt="2026061520453000-9B58DE145B4A9B8A7451479606CF81B9" src="https://github.com/user-attachments/assets/1d43d1ac-5df4-47e1-88bd-f191d57bbbec" />
+<img width="1280" height="720" alt="2026061520425100-9B58DE145B4A9B8A7451479606CF81B9" src="https://github.com/user-attachments/assets/25845789-3e23-401d-b40f-5d85b1837846" />
 
 
 If zeroconf discovery does not work on your network, you can generate credentials manually with librespot:
