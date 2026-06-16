@@ -393,21 +393,25 @@ void Dealer::stop() {
     if (thread_) { pthread_join(thread_, nullptr); thread_ = 0; }
 }
 
-void Dealer::run(std::string ws_url, ConnIdCallback conn_cb,
-                 MessageCallback msg_cb, RequestCallback req_cb) {
-    if (stop_.load()) return;
-
+// Run one WebSocket session. Returns when connection drops or stop_ is set.
+// All state (got_cid, frame_buf, frag_opcode) is scoped to this function
+// so it automatically resets on each reconnect.
+static bool run_one_session(const std::string &ws_url,
+                            const std::atomic<bool> &stop,
+                            Dealer::ConnIdCallback conn_cb,
+                            Dealer::MessageCallback msg_cb,
+                            Dealer::RequestCallback req_cb) {
     // Parse wss:// URL
     std::string host, port_str, path;
     if (!parse_wss(ws_url, host, port_str, path)) {
         PLAT_LOGF("dealer: bad URL: %.80s", ws_url.c_str());
-        return;
+        return false;
     }
 
     // TLS connect + WebSocket upgrade
     WsConn ws;
-    if (!ssl_connect(ws, host.c_str(), port_str.c_str())) return;
-    if (!http_upgrade(ws, host, path, stop_)) return;
+    if (!ssl_connect(ws, host.c_str(), port_str.c_str())) return false;
+    if (!http_upgrade(ws, host, path, stop)) return false;
 
     bool        got_cid  = false;
     time_t      last_ping = time(nullptr);
@@ -415,7 +419,7 @@ void Dealer::run(std::string ws_url, ConnIdCallback conn_cb,
     uint8_t     frag_opcode = 0;  // opcode of the fragmented message being assembled
     static constexpr size_t kMaxFrameBytes = 512 * 1024;
 
-    while (!stop_.load()) {
+    while (!stop.load()) {
         // Ping every 25 s
         time_t now = time(nullptr);
         if (now - last_ping >= 25) {
@@ -430,7 +434,7 @@ void Dealer::run(std::string ws_url, ConnIdCallback conn_cb,
 
         uint8_t     opcode  = 0;
         std::string payload;
-        int ret = ws_recv_frame(ws, opcode, payload, stop_);
+        int ret = ws_recv_frame(ws, opcode, payload, stop);
         if (ret == 0) continue;  // timeout: loop, check stop/ping
         if (ret <  0) { PLAT_LOG("dealer: recv error"); break; }
 
@@ -556,6 +560,24 @@ void Dealer::run(std::string ws_url, ConnIdCallback conn_cb,
     }
 
     PLAT_LOG("dealer: disconnected");
+    return true;
+}
+
+void Dealer::run(std::string ws_url, ConnIdCallback conn_cb,
+                 MessageCallback msg_cb, RequestCallback req_cb) {
+    while (!stop_.load()) {
+        bool ok = run_one_session(ws_url, stop_, conn_cb, msg_cb, req_cb);
+        if (stop_.load()) break;
+        if (!ok) {
+            PLAT_LOG("dealer: connection failed, retrying in 5s...");
+        } else {
+            PLAT_LOG("dealer: reconnecting in 5s...");
+        }
+        // Wait 5 seconds between reconnection attempts
+        for (int i = 0; i < 50 && !stop_.load(); ++i)
+            plat_sleep_ms(100);
+    }
+    PLAT_LOG("dealer: run loop exiting");
 }
 
 } // namespace Connect

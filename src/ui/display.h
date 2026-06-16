@@ -11,13 +11,6 @@ namespace Connect { class AudioPipeline; }
 
 namespace UI {
 
-// Renders a minimal now-playing screen to TV (1280×720) and GamePad DRC (854×480).
-//
-// Thread safety: set_* methods are safe to call from any thread.
-// render() must be called from the main thread each frame.
-//
-// Album art is fetched on a background thread via curl; the placeholder
-// (coloured box + first letter) shows until art arrives.
 
 class Display {
 public:

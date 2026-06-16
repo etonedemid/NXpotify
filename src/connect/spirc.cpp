@@ -375,8 +375,15 @@ void Spirc::dealer_init_() {
     std::string atk;
     { std::lock_guard<std::mutex> lk(token_mu_); atk = access_token_; }
     if (atk.empty()) {
-        atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
-        if (atk.empty()) { PLAT_LOG("dealer: no access token"); return; }
+        // Retry token fetch up to 3 times with 2s delay -- transient failures
+        // are common on Switch where WiFi takes a moment to warm up.
+        for (int attempt = 0; attempt < 3; attempt++) {
+            atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
+            if (!atk.empty()) break;
+            PLAT_LOGF("dealer: token fetch failed (attempt %d/3), retrying...", attempt + 1);
+            plat_sleep_ms(2000);
+        }
+        if (atk.empty()) { PLAT_LOG("dealer: no access token after retries"); return; }
         std::lock_guard<std::mutex> lk(token_mu_);
         access_token_ = atk;
     }
@@ -399,8 +406,19 @@ void Spirc::dealer_init_() {
     std::string ws_url = "wss://" + dealer_host + "/?access_token=" + atk;
     dealer_.start(ws_url,
         [this](const std::string &cid) {
-            { std::lock_guard<std::mutex> lk(conn_mu_); connection_id_ = cid; }
+            bool was_empty;
+            {
+                std::lock_guard<std::mutex> lk(conn_mu_);
+                was_empty = connection_id_.empty();
+                connection_id_ = cid;
+            }
             PLAT_LOGF("spirc: dealer connection_id ready (%zu chars)", cid.size());
+            // If this is a reconnect (we had a previous connection_id), reset helo_done_
+            // so that SPIRC_HELLO fires again and Spotify routes commands to the new session.
+            if (!was_empty) {
+                PLAT_LOG("spirc: dealer reconnect detected, resetting helo_done_");
+                helo_done_.store(false);
+            }
             if (started_.load())
                 put_connect_state_async(1 /* SPIRC_HELLO */, playing_, pos_ms_, vol_pct_);
         },
@@ -900,11 +918,10 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
     }
 
     if (reason == 1 /* SPIRC_HELLO */ && (code == 200 || code == 204)) {
-        helo_done_.store(true);
+        bool was_done = helo_done_.exchange(true);
         // Always push current state after HELLO succeeds.
-        // A Load/Play command may have raced and been dropped while helo_done_=false,
-        // and playing_ is read from a detached thread so skip the racy bool guard.
         put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing_, pos_ms_, vol_pct_);
+        // Fire on_ready on first connect AND on reconnect (when was_done was true)
         if (callbacks_.on_ready) callbacks_.on_ready();
     }
     return code;
@@ -1022,7 +1039,14 @@ void Spirc::handle_dealer_message(const std::string &uri,
     }
 
     // Suppress cluster echoes of our own state.
-    if (cs.track_uri == current_track_uri_ && (playing_ || !cs.is_playing)) {
+    // BUT: always process if the context_index changed (skip/advance from another device)
+    // or if the playing state changed (pause/resume).
+    bool index_changed = (cs.context_index_track != UINT32_MAX &&
+                          cs.context_index_track != abs_track_idx_);
+    bool track_changed = (cs.track_uri != current_track_uri_);
+    bool state_changed = (cs.is_playing != playing_);
+
+    if (!track_changed && !index_changed && !state_changed) {
         if (!cs.is_playing) local_pause_pending_.store(false);  // cluster confirmed paused
         // Periodic keepalive PUT if we haven't pushed recently.
         int64_t now_ms = now_ms_spirc();
@@ -1030,12 +1054,14 @@ void Spirc::handle_dealer_message(const std::string &uri,
             put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
         return;
     }
-    // Suppress cluster updates for old tracks while we're loading/playing a new one.
-    // This drops echoes of PUT(old_track) that complete after we already switched:
-    // those echoes have cs.track_uri == old_track != current_track_uri_.
-    if (!current_track_uri_.empty() && cs.track_uri != current_track_uri_ && playing_) {
-        PLAT_LOGF("spirc: cluster drop stale echo '%s' (current='%s')",
-                     cs.track_uri.c_str(), current_track_uri_.c_str());
+
+    // Drop stale echoes: if the cluster shows an OLD track while we're playing
+    // a NEW track, AND the index hasn't advanced, this is an echo of our pre-switch state.
+    if (track_changed && playing_ && !index_changed && 
+        cs.context_index_track != UINT32_MAX && 
+        cs.context_index_track == abs_track_idx_) {
+        PLAT_LOGF("spirc: cluster drop stale echo '%s' (current='%s') idx=%u",
+                     cs.track_uri.c_str(), current_track_uri_.c_str(), abs_track_idx_);
         return;
     }
 
@@ -1062,6 +1088,8 @@ void Spirc::handle_dealer_message(const std::string &uri,
     current_track_uri_ = cs.track_uri;
 
     if (same_context) {
+        // Find the track in our existing list
+        bool found = false;
         for (size_t k = 0; k < track_uris_.size(); ++k) {
             if (track_uris_[k] == cs.track_uri) {
                 playing_track_idx_ = (uint32_t)k;
@@ -1071,36 +1099,52 @@ void Spirc::handle_dealer_message(const std::string &uri,
                     track_gids_[k] = gid;
                 PLAT_LOGF("spirc: cluster advance in-ctx idx=%zu abs=%u",
                              k, abs_track_idx_);
+                found = true;
                 need_ctx_fetch = false;
                 break;
             }
         }
+        if (!found) {
+            // Track not in our list - maybe playlist changed or we only had partial context
+            PLAT_LOG("spirc: cluster track not in current list, will rebuild window");
+        }
     }
 
     if (need_ctx_fetch) {
-        // Build cluster window as initial track list; Mercury will expand it.
-        std::vector<std::string> all_uris, all_uids;
-        for (size_t k = 0; k < cs.prev_uris.size(); ++k) {
-            all_uris.push_back(cs.prev_uris[k]);
-            all_uids.push_back(k < cs.prev_uids.size() ? cs.prev_uids[k] : "");
+        // If we already have a full track list, just update the current track's index
+        // rather than replacing everything with a small window
+        if (!track_uris_.empty() && cs.context_index_track != UINT32_MAX &&
+            cs.context_index_track < track_uris_.size()) {
+            playing_track_idx_ = cs.context_index_track;
+            abs_track_idx_ = cs.context_index_track;
+            if (gid.size() == 16 && playing_track_idx_ < track_gids_.size())
+                track_gids_[playing_track_idx_] = gid;
+            PLAT_LOGF("spirc: cluster update idx in full list: %u", playing_track_idx_);
+        } else {
+            // Build cluster window as initial track list; Mercury will expand it.
+            std::vector<std::string> all_uris, all_uids;
+            for (size_t k = 0; k < cs.prev_uris.size(); ++k) {
+                all_uris.push_back(cs.prev_uris[k]);
+                all_uids.push_back(k < cs.prev_uids.size() ? cs.prev_uids[k] : "");
+            }
+            size_t cur_idx = all_uris.size();
+            all_uris.push_back(cs.track_uri);
+            all_uids.push_back(cs.track_uid);
+            for (size_t k = 0; k < cs.next_uris.size(); ++k) {
+                all_uris.push_back(cs.next_uris[k]);
+                all_uids.push_back(k < cs.next_uids.size() ? cs.next_uids[k] : "");
+            }
+            track_uris_        = all_uris;
+            track_uids_        = all_uids;
+            track_gids_.assign(all_uris.size(), {});
+            if (gid.size() == 16) track_gids_[cur_idx] = gid;
+            playing_track_idx_ = (uint32_t)cur_idx;
+            abs_track_idx_ = (cs.context_index_track != UINT32_MAX)
+                             ? cs.context_index_track : (uint32_t)cur_idx;
+            PLAT_LOGF("spirc: cluster list=%zu prev=%zu next=%zu cur=%zu abs=%u",
+                         all_uris.size(), cs.prev_uris.size(), cs.next_uris.size(),
+                         cur_idx, abs_track_idx_);
         }
-        size_t cur_idx = all_uris.size();
-        all_uris.push_back(cs.track_uri);
-        all_uids.push_back(cs.track_uid);
-        for (size_t k = 0; k < cs.next_uris.size(); ++k) {
-            all_uris.push_back(cs.next_uris[k]);
-            all_uids.push_back(k < cs.next_uids.size() ? cs.next_uids[k] : "");
-        }
-        track_uris_        = all_uris;
-        track_uids_        = all_uids;
-        track_gids_.assign(all_uris.size(), {});
-        if (gid.size() == 16) track_gids_[cur_idx] = gid;
-        playing_track_idx_ = (uint32_t)cur_idx;
-        abs_track_idx_ = (cs.context_index_track != UINT32_MAX)
-                         ? cs.context_index_track : (uint32_t)cur_idx;
-        PLAT_LOGF("spirc: cluster list=%zu prev=%zu next=%zu cur=%zu abs=%u",
-                     all_uris.size(), cs.prev_uris.size(), cs.next_uris.size(),
-                     cur_idx, abs_track_idx_);
     }
 
     playing_           = cs.is_playing;
@@ -1522,22 +1566,30 @@ void Spirc::notify(bool playing, int pos_ms, int vol_pct) {
 }
 
 void Spirc::skip(bool next_track) {
-    size_t n = track_gids_.size();
+    size_t n = track_uris_.size();
     if (n == 0) return;
+
+    uint32_t new_idx = playing_track_idx_;
     if (next_track) {
         if (shuffle_ && n > 1) {
-            size_t new_idx;
-            do { new_idx = (size_t)rand() % n; } while (new_idx == playing_track_idx_);
-            playing_track_idx_ = new_idx;
-            // For shuffle the absolute index is arbitrary; advance by 1 as a placeholder
-            abs_track_idx_++;
+            size_t rand_idx;
+            do { rand_idx = (size_t)rand() % n; } while (rand_idx == playing_track_idx_);
+            new_idx = (uint32_t)rand_idx;
         } else {
-            playing_track_idx_ = (playing_track_idx_ + 1) % n;
-            abs_track_idx_++;
+            new_idx = (uint32_t)((playing_track_idx_ + 1) % n);
         }
     } else {
-        playing_track_idx_ = (playing_track_idx_ == 0) ? n - 1 : playing_track_idx_ - 1;
-        if (abs_track_idx_ > 0) abs_track_idx_--;
+        new_idx = (playing_track_idx_ == 0) ? (uint32_t)(n - 1) : playing_track_idx_ - 1;
+    }
+
+    // Update indices BEFORE firing callbacks so cluster echo suppression sees correct state
+    playing_track_idx_ = new_idx;
+    // Only increment abs_track_idx_ on forward skip, not on wrap-around
+    // The cluster will correct us with the real absolute index
+    if (next_track && playing_track_idx_ != 0) {
+        abs_track_idx_++;
+    } else if (!next_track && abs_track_idx_ > 0) {
+        abs_track_idx_--;
     }
 
     const std::string &uri = playing_track_idx_ < track_uris_.size()
@@ -1545,10 +1597,12 @@ void Spirc::skip(bool next_track) {
 
     // GID may be absent for queue entries populated from a play command's inline
     // track list.  Derive it from the base-62 URI so metadata fetch always fires.
-    std::vector<uint8_t> gid = track_gids_[playing_track_idx_];
+    std::vector<uint8_t> gid = (playing_track_idx_ < track_gids_.size()) 
+                               ? track_gids_[playing_track_idx_] : std::vector<uint8_t>{};
     if (gid.size() != 16 && uri.size() > 14 && uri.compare(0, 14, "spotify:track:") == 0) {
         gid = base62_to_gid(uri.c_str() + 14, uri.size() - 14);
-        track_gids_[playing_track_idx_] = gid;
+        if (playing_track_idx_ < track_gids_.size())
+            track_gids_[playing_track_idx_] = gid;
     }
 
     current_track_uri_ = uri;

@@ -240,6 +240,8 @@ private:
     // Dealer WebSocket -- provides the connection_id for connect-state
     Dealer            dealer_;
     pthread_t         dealer_init_pth_ = 0;    // fetches token then starts dealer_
+
+    std::atomic<bool> zeroconf_announced_{false};
 };
 
 } // namespace Connect
