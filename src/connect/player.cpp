@@ -156,7 +156,7 @@ void Player::run() {
             if (spirc_->repeat_track())
                 spirc_->replay_current();
             else
-                spirc_->notify_track_end(volume_);
+                spirc_->skip(true);
         }
         state_.store(State::Ready);
     };
@@ -647,7 +647,7 @@ void Player::handle_buttons(uint32_t trigger) {
 // Touch zones (1280×720 framebuffer space):
 //   Progress bar seek : x 40-1240, y 600-660
 //   Album art tap     : x 40-400,  y 60-420  → play/pause
-//   Swipe anywhere    : |dx| > 120, |dy| < 90 → next (left) / prev (right)
+//   Swipe anywhere    : |dx| > 120, |dy| < 90 → next (right) / prev (left)
 
 void Player::handle_touch() {
     HidTouchScreenState ts{};
@@ -659,7 +659,7 @@ void Player::handle_touch() {
             int dy = (int)touch_.cur_y - touch_.start_y;
 
             if (std::abs(dx) >= 120 && std::abs(dy) < 90) {
-                if (dx < 0) spirc_->skip(true);
+                if (dx > 0) spirc_->skip(true);
                 else        spirc_->skip(false);
             } else if (touch_.start_x >= 40  && touch_.start_x <= 400 &&
                        touch_.start_y >= 60  && touch_.start_y <= 420 &&
