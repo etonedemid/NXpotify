@@ -51,8 +51,7 @@ public:
         int                  feeling = 0;  // 0-5
         std::vector<uint8_t> memo;         // raw TGA 320×120 BGRA from lower-left; empty = text-only
     };
-    // Pass nullptr to hide the card.
-    void set_olv_post(const OLVPost *post);
+
 
     // ── cached text label ────────────────────────────────────────────────────
     // Texture is recreated only when str or col changes. max_w=-1 means
@@ -73,7 +72,7 @@ private:
     void render_login(SDL_Renderer *r, int w, int h);
     void render_playing(SDL_Renderer *r, int w, int h, bool handheld = false);
     void render_controls(SDL_Renderer *r, int w, int h);
-    void render_olv_card(SDL_Renderer *r, int w, int h);
+
 
     // Ensure lbl holds an up-to-date texture for (text, col, max_w).
     // Returns true if the texture was (re)created this call.
@@ -120,8 +119,6 @@ private:
     CachedLabel lc_shuf_,  lc_rep_, lc_xtal_; // SHUF / REP / XTAL (color encodes on/off)
     CachedLabel lc_bhint_;                    // "B: Controls" -- static, baked in init
     CachedLabel lc_wait_[2];                  // waiting-screen lines
-    CachedLabel lc_olv_header_;               // "Roséverse  @name  :)"
-    CachedLabel lc_olv_body_;                 // post body text
 
     // ── display state (guarded by mu_) ───────────────────────────────────────
     std::mutex  mu_;
@@ -143,18 +140,10 @@ private:
     int         crystal_strength_ = 5;
     bool        controls_         = false;
     bool        handheld_         = false;
-    bool        olv_visible_      = false;
-    std::string olv_body_;
-    std::string olv_header_;  // pre-formatted "@name  :)" line
-    // Pending drawing texture (set from any thread under mu_; created on main thread in render())
-    std::vector<uint8_t> olv_memo_pending_;
-    bool                 olv_memo_dirty_ = false;
-    // Drawing texture -- main-thread only, NOT under mu_
-    SDL_Texture         *olv_memo_tex_   = nullptr;
 
     // ── spectrum visualizer ───────────────────────────────────────────────────
     Connect::AudioPipeline *audio_src_ = nullptr;
-    static constexpr int SPEC_BARS = 48;
+    static constexpr int SPEC_BARS = 128;
 
     // Background worker (CPU0, ~30 Hz) writes here; render thread reads.
     std::mutex spec_mu_;

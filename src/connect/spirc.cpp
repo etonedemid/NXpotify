@@ -72,7 +72,8 @@ static void pb_f64(std::vector<uint8_t> &b, uint32_t f, double v) {
 static void pb_sint32(std::vector<uint8_t> &b, uint32_t f, int32_t v) {
     pb_tag(b, f, 0);
     // zigzag encoding required for sint32
-    pb_vi(b, ((uint64_t)(uint32_t)(v << 1)) ^ (uint64_t)(uint32_t)(v >> 31));
+    uint32_t uv = (uint32_t)v;
+    pb_vi(b, ((uint64_t)(uv << 1)) ^ (uint64_t)(uv >> 31));
 }
 
 // ── Protobuf reader ───────────────────────────────────────────────────────────
@@ -171,12 +172,12 @@ static std::vector<uint8_t> b64_decode(const char *s, size_t len) {
     static const int8_t T[256] = {
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,62,-1,63,
         52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
         -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
         15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
         -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,63,
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -199,30 +200,15 @@ static std::vector<uint8_t> b64_decode(const char *s, size_t len) {
 }
 
 // ── ClusterUpdate parser ──────────────────────────────────────────────────────
-// Parses a connect-state v1 ClusterUpdate proto (field 1 = Cluster) and
-// extracts the active device id and its current PlayerState track URI.
-// Field numbers from connect.proto / player.proto (librespot-compatible):
-//   ClusterUpdate.cluster       = 1
-//   Cluster.active_device_id    = 2
-//   Cluster.player_state        = 3
-//   PlayerState.context_uri     = 2
-//   PlayerState.track           = 7  (ProvidedTrack, current track)
-//   PlayerState.prev_tracks     = 8  (repeated ProvidedTrack)
-//   PlayerState.next_tracks     = 9  (repeated ProvidedTrack)
-//   PlayerState.position_as_of_timestamp = 10
-//   PlayerState.is_playing      = 12
-//   ProvidedTrack.uri           = 1
-//   ProvidedTrack.uid           = 2
-
 struct ClusterState {
-    bool                     has_cluster         = false;  // ClusterUpdate.cluster was present
+    bool                     has_cluster         = false;
     std::string              active_device_id;
     std::string              track_uri;
     std::string              track_uid;
     std::string              context_uri;
     int64_t                  position_ms         = 0;
     bool                     is_playing          = false;
-    uint32_t                 context_index_track = UINT32_MAX;  // UINT32_MAX = not present
+    uint32_t                 context_index_track = UINT32_MAX;
     std::vector<std::string> prev_uris;
     std::vector<std::string> prev_uids;
     std::vector<std::string> next_uris;
@@ -247,7 +233,7 @@ static ClusterState parse_cluster_update(const std::vector<uint8_t> &data) {
                     while (ps.next(f, w)) {
                         if (f == 2 && w == 2) {        // context_uri
                             ps.read_str(cs.context_uri);
-                        } else if (f == 6 && w == 2) { // ContextIndex (absolute playlist pos)
+                        } else if (f == 6 && w == 2) { // ContextIndex
                             PRd ci; ps.enter(ci);
                             while (ci.next(f, w)) {
                                 if (f == 2 && w == 0) {
@@ -256,7 +242,6 @@ static ClusterState parse_cluster_update(const std::vector<uint8_t> &data) {
                                 } else ci.skip(w);
                             }
                         } else if (f == 7 && w == 2) { // track (ProvidedTrack)
-                            // ProvidedTrack { context_track=1 (ContextTrack { uri=1, uid=2 }), ... }
                             PRd tr; ps.enter(tr);
                             while (tr.next(f, w)) {
                                 if (f == 1 && w == 2) {    // context_track
@@ -268,11 +253,11 @@ static ClusterState parse_cluster_update(const std::vector<uint8_t> &data) {
                                     }
                                 } else tr.skip(w);
                             }
-                        } else if (f == 8 && w == 2) { // prev_tracks (repeated ProvidedTrack)
+                        } else if (f == 8 && w == 2) { // prev_tracks
                             PRd tr; ps.enter(tr);
                             std::string uri, uid;
                             while (tr.next(f, w)) {
-                                if (f == 1 && w == 2) {    // context_track
+                                if (f == 1 && w == 2) {
                                     PRd ct; tr.enter(ct);
                                     while (ct.next(f, w)) {
                                         if      (f == 1 && w == 2) ct.read_str(uri);
@@ -285,11 +270,11 @@ static ClusterState parse_cluster_update(const std::vector<uint8_t> &data) {
                                 cs.prev_uris.push_back(uri);
                                 cs.prev_uids.push_back(uid);
                             }
-                        } else if (f == 9 && w == 2) { // next_tracks (repeated ProvidedTrack)
+                        } else if (f == 9 && w == 2) { // next_tracks
                             PRd tr; ps.enter(tr);
                             std::string uri, uid;
                             while (tr.next(f, w)) {
-                                if (f == 1 && w == 2) {    // context_track
+                                if (f == 1 && w == 2) {
                                     PRd ct; tr.enter(ct);
                                     while (ct.next(f, w)) {
                                         if      (f == 1 && w == 2) ct.read_str(uri);
@@ -321,7 +306,7 @@ static ClusterState parse_cluster_update(const std::vector<uint8_t> &data) {
     return cs;
 }
 
-// Forward declarations for static helpers defined later in this file.
+// Forward declarations
 static std::string get_access_token(const std::string &username,
                                      const std::vector<uint8_t> &auth_data,
                                      const std::string &device_id);
@@ -345,12 +330,9 @@ bool Spirc::start(Callbacks cb) {
 
     std::string user_uri = "hm://remote/3/user/" + username_ + "/";
 
-    // Modern Spotify requires these subscriptions to stay connected.
     mercury_subscribe("hm://pusher/v1/connections/");
     mercury_subscribe("hm://connect-state/v1/cluster");
-    // Volume changes from host app arrive here as binary SetVolumeCommand proto.
     mercury_subscribe("hm://connect-state/v1/connect/volume");
-    // Old Spirc endpoints for legacy command dispatch.
     mercury_subscribe(user_uri);
     mercury_subscribe(user_uri + device_id_ + "/");
 
@@ -358,11 +340,6 @@ bool Spirc::start(Callbacks cb) {
     send_hello();
     PLAT_LOGF("spirc: started, sub=%s", user_uri.c_str());
 
-    // Start Dealer WebSocket in background.
-    // Resolve the spclient first so the dealer is in the SAME cluster -- Spotify's
-    // spclient does a local-only lookup for Dealer sessions, so a cross-cluster
-    // mismatch causes HTTP 404 on every PutStateRequest.
-    // TLS + WebSocket in this thread need more stack than std::thread default.
     pthread_attr_t _da; pthread_attr_init(&_da); pthread_attr_setstacksize(&_da, 1024*1024);
     pthread_create(&dealer_init_pth_, &_da, [](void *arg) -> void* {
         reinterpret_cast<Spirc*>(arg)->dealer_init_(); return nullptr;
@@ -375,8 +352,6 @@ void Spirc::dealer_init_() {
     std::string atk;
     { std::lock_guard<std::mutex> lk(token_mu_); atk = access_token_; }
     if (atk.empty()) {
-        // Retry token fetch up to 3 times with 2s delay -- transient failures
-        // are common on Switch where WiFi takes a moment to warm up.
         for (int attempt = 0; attempt < 3; attempt++) {
             atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
             if (!atk.empty()) break;
@@ -389,12 +364,10 @@ void Spirc::dealer_init_() {
     }
     if (!started_.load()) return;
 
-    // Resolve spclient and cache it (saves a second resolve in put_connect_state_sync).
     std::string sp = resolve_spclient_host();
     { std::lock_guard<std::mutex> lk(spclient_mu_); if (spclient_host_.empty()) spclient_host_ = sp; }
 
-    // Derive dealer host from spclient host by replacing "-spclient." with "-dealer.".
-    std::string dealer_host = "dealer.spotify.com";   // fallback
+    std::string dealer_host = "dealer.spotify.com";
     {
         const std::string from = "-spclient.";
         const std::string to   = "-dealer.";
@@ -413,8 +386,6 @@ void Spirc::dealer_init_() {
                 connection_id_ = cid;
             }
             PLAT_LOGF("spirc: dealer connection_id ready (%zu chars)", cid.size());
-            // If this is a reconnect (we had a previous connection_id), reset helo_done_
-            // so that SPIRC_HELLO fires again and Spotify routes commands to the new session.
             if (!was_empty) {
                 PLAT_LOG("spirc: dealer reconnect detected, resetting helo_done_");
                 helo_done_.store(false);
@@ -434,7 +405,6 @@ void Spirc::stop() {
     if (!started_.exchange(false)) return;
     dealer_.stop();
     if (dealer_init_pth_) { pthread_join(dealer_init_pth_, nullptr); dealer_init_pth_ = 0; }
-    // Send Goodbye frame
     std::string user_uri = "hm://remote/3/user/" + username_ + "/";
     auto frame = build_frame(MsgType::Goodbye, false, 0, vol_pct_);
     mercury_send(user_uri, frame);
@@ -442,20 +412,17 @@ void Spirc::stop() {
 
 // ── Mercury wire helpers ──────────────────────────────────────────────────────
 
-// Build and send a single-part or two-part Mercury packet.
-// Returns the mercury sequence number used.
 static uint32_t make_mercury_pkt(std::vector<uint8_t> &out,
                                   uint32_t seq,
                                   const std::vector<uint8_t> &header,
                                   const std::vector<uint8_t> &body) {
-    // Mercury wire format: [2B seq_len] [seq_len bytes seq] [1B flags] [2B part_count]
     uint16_t parts = body.empty() ? 1 : 2;
-    out.push_back(0x00); out.push_back(0x04);  // seq_len = 4 bytes
+    out.push_back(0x00); out.push_back(0x04);
     out.push_back((seq >> 24) & 0xFF);
     out.push_back((seq >> 16) & 0xFF);
     out.push_back((seq >>  8) & 0xFF);
     out.push_back( seq        & 0xFF);
-    out.push_back(0x01); // flags: complete
+    out.push_back(0x01);
     out.push_back((parts >> 8) & 0xFF);
     out.push_back( parts       & 0xFF);
 
@@ -522,13 +489,8 @@ void Spirc::mercury_get(const std::string &uri,
 // ── Frame builders ────────────────────────────────────────────────────────────
 
 std::vector<uint8_t> Spirc::build_device_state(bool active, int vol_pct) {
-    uint32_t vol = (uint32_t)(vol_pct * 655); // 0-100 → 0-65535
+    uint32_t vol = (uint32_t)(vol_pct * 655);
 
-    // DeviceState field numbers from spirc.proto (hex values):
-    //   sw_version=0x1=1  is_active=0xa=10  can_play=0xb=11
-    //   volume=0xc=12  name=0xd=13  capabilities=0x11=17
-    // CapabilityType enum: kGaiaEqConnectId=0x5=5  kIsObservable=0x7=7
-    //   kVolumeSteps=0x8=8  kSupportedTypes=0x9=9  kCommandAcks=0xa=10
     auto cap = [](uint32_t t,
                   const std::initializer_list<int32_t> &ints,
                   const std::initializer_list<std::string> &strs) {
@@ -540,45 +502,38 @@ std::vector<uint8_t> Spirc::build_device_state(bool active, int vol_pct) {
     };
 
     std::vector<uint8_t> ds;
-    pb_str(ds,  1,  "1.1.0");      // sw_version
-    pb_bool(ds, 10, active);        // is_active
-    pb_bool(ds, 11, true);          // can_play
-    pb_u32(ds,  12, vol);           // volume
-    pb_str(ds,  13, device_name_); // name
+    pb_str(ds,  1,  "1.1.0");
+    pb_bool(ds, 10, active);
+    pb_bool(ds, 11, true);
+    pb_u32(ds,  12, vol);
+    pb_str(ds,  13, device_name_);
 
-    pb_msg(ds, 17, cap(8,  {64},   {}));                  // kVolumeSteps=0x8
-    pb_msg(ds, 17, cap(9,  {},     {"audio/track"}));      // kSupportedTypes=0x9
-    pb_msg(ds, 17, cap(7,  {1},    {}));                  // kIsObservable=0x7
-    pb_msg(ds, 17, cap(10, {1},    {}));                  // kCommandAcks=0xa
-    pb_msg(ds, 17, cap(5,  {1},    {}));                  // kGaiaEqConnectId=0x5
+    pb_msg(ds, 17, cap(8,  {64},   {}));
+    pb_msg(ds, 17, cap(9,  {},     {"audio/track"}));
+    pb_msg(ds, 17, cap(7,  {1},    {}));
+    pb_msg(ds, 17, cap(10, {1},    {}));
+    pb_msg(ds, 17, cap(5,  {1},    {}));
     return ds;
 }
-
-
-// Decode percent-encoded characters in a URI component.
 
 // ── connect-state v1 builders ─────────────────────────────────────────────────
 
 std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t now_ms) {
     std::vector<uint8_t> ps;
-    pb_i64(ps, 1, now_ms);                          // timestamp
-    // Resolve the context URI to send.  Prefer the stored context if it is a
-    // type the connect-state API accepts.  Fall back to the current track URI
-    // so we never send is_active=true with an absent context_uri (HTTP 500).
-    // "spotify:user:..." URIs cause INVALID_ENTITY (400) -- omit them entirely.
+    pb_i64(ps, 1, now_ms);
+
     std::string ctx_uri;
     if (!context_uri_.empty() &&
         (context_uri_.compare(0, 17, "spotify:playlist:") == 0 ||
          context_uri_.compare(0, 14, "spotify:album:")    == 0 ||
          context_uri_.compare(0, 15, "spotify:artist:")   == 0 ||
-         context_uri_.compare(0, 20, "spotify:collection:")== 0 ||
+         context_uri_.compare(0, 19, "spotify:collection:")== 0 ||
          context_uri_.compare(0, 13, "spotify:show:")     == 0 ||
          context_uri_.compare(0, 14, "spotify:track:")    == 0)) {
         ctx_uri = context_uri_;
     }
-    // ProvidedTrack (field 7)
+
     size_t i = playing_track_idx_;
-    // Resolve URI: use stored value, or derive from GID if still empty.
     std::string track_uri_for_ps;
     if (i < track_uris_.size() && !track_uris_[i].empty()) {
         track_uri_for_ps = track_uris_[i];
@@ -587,18 +542,11 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
         if (i >= track_uris_.size()) track_uris_.resize(i + 1);
         track_uris_[i] = track_uri_for_ps;
     }
-    // Fall back: if no accepted context, use the current track URI as a
-    // single-track context so we never emit is_active=true with no context_uri.
+
     if (ctx_uri.empty() && !track_uri_for_ps.empty())
         ctx_uri = track_uri_for_ps;
     if (!ctx_uri.empty()) pb_str(ps, 2, ctx_uri);
-    // Build a ProvidedTrack proto for context slot idx.
-    // ProvidedTrack field numbers (player.proto): uri=1 uid=2 metadata=3 provider=6
-    // metadata map entries use MapEntry encoding: key=1, value=2 inside a LEN field.
-    // Required metadata keys (from librespot state/metadata.rs):
-    //   "context_uri"   -- the enclosing playlist / album URI
-    //   "entity_uri"    -- same as context_uri for regular context tracks
-    //   "context_index" -- absolute zero-based position in the context as a decimal string
+
     auto make_ctx_track = [&](int idx) -> std::vector<uint8_t> {
         std::vector<uint8_t> tr;
         pb_str(tr, 1, track_uris_[idx]);
@@ -622,18 +570,16 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
     if (!track_uri_for_ps.empty())
         pb_msg(ps, 7, make_ctx_track((int)i));
 
-    // prev_tracks (field 8): up to 10 tracks before the current one (librespot limit)
+    // prev_tracks (field 8): up to 10 tracks before the current one
     {
         int start = std::max(0, (int)i - 10);
         for (int k = start; k < (int)i; ++k) {
-            if (track_uris_[k].empty()) continue;
+            if (k >= (int)track_uris_.size() || track_uris_[k].empty()) continue;
             pb_msg(ps, 8, make_ctx_track(k));
         }
     }
 
-    // next_tracks (field 9): up to 80 tracks after the current one (librespot limit).
-    // With repeat_context, wraps around the playlist inserting a "spotify:delimiter"
-    // sentinel between iterations -- mirrors librespot's fill_up_next_tracks().
+    // next_tracks (field 9): up to 80 tracks after the current one
     {
         int n      = (int)track_uris_.size();
         int filled = 0;
@@ -642,7 +588,6 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
         while (filled < 80) {
             if (k >= n) {
                 if (!repeat_) break;
-                // Delimiter: hidden invisible sentinel separating playlist loops
                 std::vector<uint8_t> d;
                 pb_str(d, 1, "spotify:delimiter");
                 char ub[24]; snprintf(ub, sizeof(ub), "delimiter%d", iter);
@@ -663,7 +608,7 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
                 k = 0;
                 continue;
             }
-            if (!track_uris_[k].empty()) {
+            if (k < (int)track_uris_.size() && !track_uris_[k].empty()) {
                 pb_msg(ps, 9, make_ctx_track(k));
                 filled++;
             }
@@ -673,64 +618,57 @@ std::vector<uint8_t> Spirc::build_player_state(bool playing, int pos_ms, int64_t
     PLAT_LOGF("spirc: ps ctx='%.40s' uri='%.40s' idx=%u dur=%lld play=%d pos=%d",
                  ctx_uri.c_str(), track_uri_for_ps.c_str(),
                  (unsigned)playing_track_idx_, (long long)duration_ms_, (int)playing, pos_ms);
-    pb_i64(ps, 10, (int64_t)(pos_ms > 0 ? pos_ms : 0));         // position_as_of_timestamp
-    if (duration_ms_ > 0) pb_i64(ps, 11, duration_ms_);         // duration
-    pb_bool(ps, 12, playing);                                     // is_playing
-    pb_bool(ps, 13, !playing && started_playing_at_ms_ > 0);     // is_paused
-    pb_bool(ps, 14, false);                                       // is_buffering
+    pb_i64(ps, 10, (int64_t)(pos_ms > 0 ? pos_ms : 0));
+    if (duration_ms_ > 0) pb_i64(ps, 11, duration_ms_);
+    pb_bool(ps, 12, playing);
+    pb_bool(ps, 13, !playing && started_playing_at_ms_ > 0);
+    pb_bool(ps, 14, false);
     // ContextPlayerOptions (field 16)
     {
         std::vector<uint8_t> opts;
-        pb_bool(opts, 1, shuffle_);        // shuffling_context
-        pb_bool(opts, 2, repeat_);         // repeating_context
-        pb_bool(opts, 3, repeat_track_);   // repeating_track
+        pb_bool(opts, 1, shuffle_);
+        pb_bool(opts, 2, repeat_);
+        pb_bool(opts, 3, repeat_track_);
         pb_msg(ps, 16, opts);
     }
-    // ContextIndex (field 6): tells Spotify our absolute position in the context
-    // so the host app's playlist/queue view stays in sync with local skips.
+    // ContextIndex (field 6)
     if (!ctx_uri.empty()) {
         std::vector<uint8_t> cidx;
-        pb_u32(cidx, 1, 0);                         // page 0
-        pb_u32(cidx, 2, (uint32_t)abs_track_idx_);  // absolute track index
+        pb_u32(cidx, 1, 0);
+        pb_u32(cidx, 2, (uint32_t)abs_track_idx_);
         pb_msg(ps, 6, cidx);
     }
-    // playback_speed = 1.0 (field 23): required by some Spotify clients to
-    // interpolate the seek bar position between state pushes.
     if (playing) pb_f64(ps, 23, 1.0);
-    // has_context = true (field 27): signals the host app that context/queue info is valid.
     if (!ctx_uri.empty()) pb_bool(ps, 27, true);
     return ps;
 }
 
 std::vector<uint8_t> Spirc::build_device_info_cs(int vol_pct) {
-    uint32_t vol = (uint32_t)(vol_pct * 655);  // 0-100 → 0-65535
+    uint32_t vol = (uint32_t)(vol_pct * 655);
 
-    // Capabilities -- field numbers from connect.proto (Spotify 1.2.52.442 / librespot 0.8.0)
-    // connect.proto Capabilities message: fields 1, 4, 24 are reserved.
     std::vector<uint8_t> caps;
-    pb_bool(caps,  2, true);   // can_be_player
-    pb_bool(caps,  5, true);   // gaia_eq_connect_id
-    pb_bool(caps,  7, true);   // is_observable
-    pb_u32 (caps,  8, 64);     // volume_steps (int32, 64 steps)
-    pb_str (caps,  9, "audio/track");  // supported_types
-    pb_bool(caps, 10, true);   // command_acks
-    pb_bool(caps, 16, true);   // is_controllable
-    pb_bool(caps, 19, true);   // supports_transfer_command
-    pb_bool(caps, 20, true);   // supports_command_request
-    pb_bool(caps, 22, true);   // needs_full_player_state
-    pb_bool(caps, 25, true);   // supports_set_options_command (shuffle/repeat/volume)
+    pb_bool(caps,  2, true);
+    pb_bool(caps,  5, true);
+    pb_bool(caps,  7, true);
+    pb_u32 (caps,  8, 64);
+    pb_str (caps,  9, "audio/track");
+    pb_bool(caps, 10, true);
+    pb_bool(caps, 16, true);
+    pb_bool(caps, 19, true);
+    pb_bool(caps, 20, true);
+    pb_bool(caps, 22, true);
+    pb_bool(caps, 25, true);
 
-    // DeviceInfo -- field numbers from connect.proto
     std::vector<uint8_t> di;
-    pb_bool(di, 1,  true);           // can_play
-    pb_u32 (di, 2,  vol);            // volume
-    pb_str (di, 3,  device_name_);  // name
-    pb_msg (di, 4,  caps);           // capabilities
-    pb_str (di, 6,  "1.1.0");        // device_software_version
-    pb_u32 (di, 7,  9);              // device_type: GAME_CONSOLE = 9
-    pb_str (di, 9,  "3.2.6");        // spirc_version
-    pb_str (di, 10, device_id_);    // device_id
-    pb_str (di, 13, "65b708073fc0480ea92a077233ca87bd");  // client_id
+    pb_bool(di, 1,  true);
+    pb_u32 (di, 2,  vol);
+    pb_str (di, 3,  device_name_);
+    pb_msg (di, 4,  caps);
+    pb_str (di, 6,  "1.1.0");
+    pb_u32 (di, 7,  9);
+    pb_str (di, 9,  "3.2.6");
+    pb_str (di, 10, device_id_);
+    pb_str (di, 13, "65b708073fc0480ea92a077233ca87bd");
     return di;
 }
 
@@ -769,23 +707,16 @@ void Spirc::become_inactive() {
     playing_ = false;
     current_track_uri_.clear();
     started_playing_at_ms_ = 0;
-    // Tell Spotify we're inactive via HTTP (works without an AP connection).
-    // reason=7 is BECAME_INACTIVE; is_active=false (field 4).
     put_connect_state_async(7 /* BECAME_INACTIVE */, false, 0, vol_pct_);
 }
 
 void Spirc::put_connect_state_async(uint32_t reason, bool playing, int pos_ms, int vol_pct) {
-    // At most one PUT inflight at a time.  If one is already running, mark dirty
-    // and return -- the inflight thread will fire a follow-up when it finishes.
     int expected = 0;
     if (!push_inflight_.compare_exchange_strong(expected, 1)) {
         dirty_push_.store(true);
         return;
     }
 
-    // We own the slot -- build proto from current state and fire.
-    // Throttle tracking uses boot-relative ms; proto timestamps
-    // use Unix ms from time() which is 0 on Wii U but was accepted by Spotify before.
     int64_t throttle_ms = now_ms_spirc();
     int64_t proto_ms    = (int64_t)time(nullptr) * 1000;
     int64_t sat         = started_playing_at_ms_;
@@ -803,9 +734,17 @@ void Spirc::put_connect_state_async(uint32_t reason, bool playing, int pos_ms, i
     pb_i64 (psr, 12, proto_ms);
 
     last_state_push_ms_ = throttle_ms;
-    // put_connect_state_sync does HTTPS (TLS) -- needs > default thread stack on Switch.
-    struct PutArg { Spirc *self; std::vector<uint8_t> psr; uint32_t reason; bool playing; };
-    auto *arg = new PutArg{this, std::move(psr), reason, playing};
+
+    // Capture current state by value for the background thread so we don't
+    // read stale playing_/pos_ms_/vol_pct_ from the main thread after a change.
+    bool   cur_playing  = playing_;
+    int    cur_pos_ms   = pos_ms_;
+    int    cur_vol_pct  = vol_pct_;
+
+    struct PutArg { Spirc *self; std::vector<uint8_t> psr; uint32_t reason; bool playing;
+                    bool cur_playing; int cur_pos_ms; int cur_vol_pct; };
+    auto *arg = new PutArg{this, std::move(psr), reason, playing,
+                            cur_playing, cur_pos_ms, cur_vol_pct};
     pthread_t pth; pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 1024 * 1024);
@@ -814,7 +753,7 @@ void Spirc::put_connect_state_async(uint32_t reason, bool playing, int pos_ms, i
         a->self->put_connect_state_sync(std::move(a->psr), a->reason, a->playing);
         a->self->push_inflight_.store(0);
         if (a->self->dirty_push_.exchange(false))
-            a->self->put_connect_state_async(4, a->self->playing_, a->self->pos_ms_, a->self->vol_pct_);
+            a->self->put_connect_state_async(4, a->cur_playing, a->cur_pos_ms, a->cur_vol_pct);
         delete a;
         return nullptr;
     }, arg);
@@ -846,15 +785,11 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
         host = spclient_host_;
     }
 
-    // PUT /connect-state/v1/devices/{device_id} -- same namespace as /devices/helo.
-    // The Dealer connection_id goes in X-Spotify-Connection-Id for cluster routing.
     std::string path     = "/connect-state/v1/devices/" + device_id_;
     std::string url      = "https://" + host + path;
     std::string auth_hdr = "Authorization: Bearer " + atk;
     std::string conn_hdr = "X-Spotify-Connection-Id: " + conn_id;
 
-    // For the very first call: also PUT /devices/helo to register the device in the
-    // spclient cluster before the session lookup happens.
     if (reason == 1 /* SPIRC_HELLO */) {
         std::string helo_url = "https://" + host + "/connect-state/v1/devices/helo";
         CURL *hc = curl_easy_init();
@@ -881,48 +816,57 @@ long Spirc::put_connect_state_sync(std::vector<uint8_t> psr, uint32_t reason, bo
         }
     }
 
-    CURL *curl = curl_easy_init();
-    if (!curl) return 0;
-    struct curl_slist *hdrs = nullptr;
-    hdrs = curl_slist_append(hdrs, auth_hdr.c_str());
-    hdrs = curl_slist_append(hdrs, conn_hdr.c_str());
-    hdrs = curl_slist_append(hdrs, "Content-Type: application/x-protobuf");
-    hdrs = curl_slist_append(hdrs, "Accept: application/x-protobuf");
-    curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER,     hdrs);
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST,  "PUT");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS,     psr.data());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,  (long)psr.size());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-        +[](char *, size_t s, size_t n, void *) -> size_t { return s * n; });
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        8L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-
     if (reason != 1 /* SPIRC_HELLO */ && !helo_done_.load()) {
-        curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
         PLAT_LOG("spirc: put_cs skipped -- helo not done yet");
         return 0;
     }
 
-    curl_easy_perform(curl);
-    long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
+    // Helper lambda to perform the PUT with a given token.
+    auto do_put = [&](const std::string &token) -> long {
+        std::string ahdr = "Authorization: Bearer " + token;
+        CURL *curl = curl_easy_init();
+        if (!curl) return 0;
+        struct curl_slist *hdrs = nullptr;
+        hdrs = curl_slist_append(hdrs, ahdr.c_str());
+        hdrs = curl_slist_append(hdrs, conn_hdr.c_str());
+        hdrs = curl_slist_append(hdrs, "Content-Type: application/x-protobuf");
+        hdrs = curl_slist_append(hdrs, "Accept: application/x-protobuf");
+        curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER,     hdrs);
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST,  "PUT");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS,     psr.data());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,  (long)psr.size());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+            +[](char *, size_t s, size_t n, void *) -> size_t { return s * n; });
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT,        8L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_perform(curl);
+        long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+        curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
+        return code;
+    };
+
+    long code = do_put(atk);
     PLAT_LOGF("spirc: put_cs reason=%u playing=%d → HTTP %ld", reason, (int)playing, code);
 
-    // Expired token → evict so the next call will re-fetch
+    // Expired token: evict, re-fetch once, and retry the PUT immediately.
     if (code == 401) {
-        std::lock_guard<std::mutex> lk(token_mu_);
-        access_token_.clear();
-        PLAT_LOG("spirc: put_cs 401 -- token evicted");
+        PLAT_LOG("spirc: put_cs 401 -- evicting token, re-fetching");
+        { std::lock_guard<std::mutex> lk(token_mu_); access_token_.clear(); }
+        std::string new_atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
+        if (!new_atk.empty()) {
+            { std::lock_guard<std::mutex> lk(token_mu_); access_token_ = new_atk; }
+            code = do_put(new_atk);
+            PLAT_LOGF("spirc: put_cs retry → HTTP %ld", code);
+        }
     }
 
     if (reason == 1 /* SPIRC_HELLO */ && (code == 200 || code == 204)) {
         bool was_done = helo_done_.exchange(true);
-        // Always push current state after HELLO succeeds.
         put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing_, pos_ms_, vol_pct_);
-        // Fire on_ready on first connect AND on reconnect (when was_done was true)
         if (callbacks_.on_ready) callbacks_.on_ready();
+        (void)was_done;
     }
     return code;
 }
@@ -933,14 +877,13 @@ void Spirc::handle_dealer_message(const std::string &uri,
                                    const std::vector<uint8_t> &payload) {
     if (payload.empty()) return;
 
-    // SetVolumeCommand: binary proto { int32 volume = 1; }
     if (uri == "hm://connect-state/v1/connect/volume") {
         PRd rd{payload.data(), payload.data() + payload.size()};
         uint32_t f; uint8_t w;
         while (rd.next(f, w)) {
             if (f == 1 && w == 0) {
                 uint64_t v; rd.vi(v);
-                int raw = (int)v;  // 0-65535
+                int raw = (int)v;
                 int pct = (int)((uint64_t)raw * 100 / 65535);
                 PLAT_LOGF("spirc: volume cmd %d (%d%%)", raw, pct);
                 vol_pct_ = pct;
@@ -959,7 +902,6 @@ void Spirc::handle_dealer_message(const std::string &uri,
                  (int)cs.has_cluster, cs.active_device_id.c_str(), (int)cs.is_playing);
     PLAT_LOGF("spirc: cluster upd ours='%.40s'", device_id_.c_str());
 
-    // No cluster sub-message: librespot treats this as became_inactive when active.
     if (!cs.has_cluster) {
         if (playing_ || !current_track_uri_.empty()) {
             PLAT_LOG("spirc: no-cluster update while active -- became inactive");
@@ -970,16 +912,10 @@ void Spirc::handle_dealer_message(const std::string &uri,
         return;
     }
 
-    // active_device_id empty = no device is currently active.
-    // active_device_id != ours = another device took over.
     if (cs.active_device_id != device_id_) {
         PLAT_LOGF("spirc: became inactive (active='%.40s')",
                      cs.active_device_id.c_str());
 
-        // active='' playing=1 is always a stale echo from our own put_cs(playing=false).
-        // Real device switches arrive as active=<other_device_id>.
-        // Ignore all active='' playing=1 to avoid the feedback loop:
-        //   became_inactive → put_cs(playing=0) → echo(active='') → became_inactive → …
         if (cs.active_device_id.empty() && cs.is_playing) {
             PLAT_LOG("spirc: cluster active='' playing=1 -- stale echo, ignoring");
             return;
@@ -988,28 +924,18 @@ void Spirc::handle_dealer_message(const std::string &uri,
         if (playing_ || !current_track_uri_.empty()) {
             playing_ = false;
             current_track_uri_.clear();
-            // Reset so any lingering echoes are caught by the active='' playing=1 guard above.
             started_playing_at_ms_ = 0;
-            // Don't send put_cs -- Spotify already knows we're inactive (it told us), and
-            // sending one would generate another cluster echo, restarting the loop.
             if (callbacks_.on_became_inactive) callbacks_.on_became_inactive();
         }
-        // Spotify has acknowledged we're inactive (different active device).
-        // The next active=ours cluster is a genuine user re-selection, not a stale echo.
         if (inactive_.load()) saw_inactive_cluster_.store(true);
         return;
     }
 
-    // We are (or are becoming) the active device.
     if (inactive_.load()) {
         if (!saw_inactive_cluster_.load()) {
-            // inactive_ just set; stale echo of our pre-drop put_cs(playing=1).
-            // Spotify hasn't yet confirmed the other device is active -- ignore.
             PLAT_LOG("spirc: cluster active=ours while inactive (stale echo) -- ignoring");
             return;
         }
-        // Spotify previously told us another device was active, now routes back to us:
-        // the user explicitly re-selected this device. Clear inactive and proceed.
         PLAT_LOG("spirc: cluster active=ours -- re-activating after inactive");
         inactive_.store(false);
         saw_inactive_cluster_.store(false);
@@ -1017,15 +943,10 @@ void Spirc::handle_dealer_message(const std::string &uri,
 
     if (cs.track_uri.empty()) return;
 
-    // Same track, paused mid-song (started_playing_at_ms_ > 0), cluster says play:
-    // treat as resume, not reload.  started_playing_at_ms_==0 means the track ended
-    // naturally (notify_track_end reset it), so that case still falls through to a
-    // full reload (repeat-track behaviour).
+    // Resume: same track, paused, cluster says play
     if (cs.track_uri == current_track_uri_ && !playing_ && cs.is_playing
             && started_playing_at_ms_ > 0) {
         if (local_pause_pending_.exchange(false)) {
-            // Stale cluster echo from an in-flight PUT that landed before our pause
-            // PUT -- re-assert paused state and ignore the resume signal.
             PLAT_LOG("spirc: cluster resume suppressed (local pause pending)");
             put_connect_state_async(4, false, pos_ms_, vol_pct_);
             return;
@@ -1033,32 +954,32 @@ void Spirc::handle_dealer_message(const std::string &uri,
         PLAT_LOGF("spirc: cluster resume @%ldms", (long)cs.position_ms);
         playing_ = true;
         pos_ms_  = (int)cs.position_ms;
+        started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;  // FIX: reset timer on resume
         if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(true, pos_ms_);
         put_connect_state_async(4, true, pos_ms_, vol_pct_);
         return;
     }
 
-    // Suppress cluster echoes of our own state.
-    // BUT: always process if the context_index changed (skip/advance from another device)
-    // or if the playing state changed (pause/resume).
     bool index_changed = (cs.context_index_track != UINT32_MAX &&
                           cs.context_index_track != abs_track_idx_);
     bool track_changed = (cs.track_uri != current_track_uri_);
     bool state_changed = (cs.is_playing != playing_);
 
     if (!track_changed && !index_changed && !state_changed) {
-        if (!cs.is_playing) local_pause_pending_.store(false);  // cluster confirmed paused
-        // Periodic keepalive PUT if we haven't pushed recently.
-        int64_t now_ms = now_ms_spirc();
-        if (helo_done_.load() && now_ms - last_state_push_ms_ >= 30000)
-            put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
-        return;
+        if (!cs.is_playing) local_pause_pending_.store(false);
+        // If current_track_uri_ is empty we just called notify_track_end --
+        // don't return early; fall through so the cluster can trigger the next load.
+        if (!current_track_uri_.empty()) {
+            int64_t now_ms = now_ms_spirc();
+            if (helo_done_.load() && now_ms - last_state_push_ms_ >= 30000)
+                put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
+            return;
+        }
     }
 
-    // Drop stale echoes: if the cluster shows an OLD track while we're playing
-    // a NEW track, AND the index hasn't advanced, this is an echo of our pre-switch state.
-    if (track_changed && playing_ && !index_changed && 
-        cs.context_index_track != UINT32_MAX && 
+    // Drop stale echoes of our pre-switch state
+    if (track_changed && playing_ && !index_changed &&
+        cs.context_index_track != UINT32_MAX &&
         cs.context_index_track == abs_track_idx_) {
         PLAT_LOGF("spirc: cluster drop stale echo '%s' (current='%s') idx=%u",
                      cs.track_uri.c_str(), current_track_uri_.c_str(), abs_track_idx_);
@@ -1068,7 +989,6 @@ void Spirc::handle_dealer_message(const std::string &uri,
     PLAT_LOGF("spirc: dealer → load '%s' @%ldms",
                  cs.track_uri.c_str(), (long)cs.position_ms);
 
-    // Derive GID from the base-62 track ID in the URI (spotify:track:<base62>)
     std::vector<uint8_t> gid;
     if (cs.track_uri.size() > 14 &&
         cs.track_uri.compare(0, 14, "spotify:track:") == 0) {
@@ -1079,16 +999,12 @@ void Spirc::handle_dealer_message(const std::string &uri,
     int pos = (int)cs.position_ms;
     if (callbacks_.on_play) callbacks_.on_play(cs.track_uri, pos);
 
-    // If the new track is already in our loaded full context, just advance the
-    // index -- no Mercury context-resolve needed.  This avoids saturating the AP
-    // connection with a full playlist response on every auto-advance.
     bool same_context   = (context_uri_ == cs.context_uri) && !context_uri_.empty();
     bool need_ctx_fetch = true;
     context_uri_       = cs.context_uri;
     current_track_uri_ = cs.track_uri;
 
     if (same_context) {
-        // Find the track in our existing list
         bool found = false;
         for (size_t k = 0; k < track_uris_.size(); ++k) {
             if (track_uris_[k] == cs.track_uri) {
@@ -1105,23 +1021,22 @@ void Spirc::handle_dealer_message(const std::string &uri,
             }
         }
         if (!found) {
-            // Track not in our list - maybe playlist changed or we only had partial context
             PLAT_LOG("spirc: cluster track not in current list, will rebuild window");
         }
     }
 
     if (need_ctx_fetch) {
-        // If we already have a full track list, just update the current track's index
-        // rather than replacing everything with a small window
         if (!track_uris_.empty() && cs.context_index_track != UINT32_MAX &&
             cs.context_index_track < track_uris_.size()) {
             playing_track_idx_ = cs.context_index_track;
             abs_track_idx_ = cs.context_index_track;
             if (gid.size() == 16 && playing_track_idx_ < track_gids_.size())
                 track_gids_[playing_track_idx_] = gid;
+            // Update URI at this slot in case it differed
+            if (playing_track_idx_ < track_uris_.size())
+                track_uris_[playing_track_idx_] = cs.track_uri;
             PLAT_LOGF("spirc: cluster update idx in full list: %u", playing_track_idx_);
         } else {
-            // Build cluster window as initial track list; Mercury will expand it.
             std::vector<std::string> all_uris, all_uids;
             for (size_t k = 0; k < cs.prev_uris.size(); ++k) {
                 all_uris.push_back(cs.prev_uris[k]);
@@ -1150,7 +1065,7 @@ void Spirc::handle_dealer_message(const std::string &uri,
     playing_           = cs.is_playing;
     pos_ms_            = pos;
     state_update_id_   = 0;
-    duration_ms_       = 0;  // reset; fetch_track_metadata will populate it
+    duration_ms_       = 0;
     if (cs.is_playing && started_playing_at_ms_ == 0)
         started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
 
@@ -1160,8 +1075,6 @@ void Spirc::handle_dealer_message(const std::string &uri,
 }
 
 // ── Dealer request (player command) handler ───────────────────────────────────
-// Called from the Dealer thread for type:"request" frames.
-// Parses the command JSON and dispatches to the appropriate callbacks.
 
 bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
                                    const std::string &cmd_json) {
@@ -1172,9 +1085,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         return false;
     }
 
-    // The Request JSON nests the command under a "command" key:
-    //   {"message_id":1,"sent_by_device_id":"...","command":{"endpoint":"play",...}}
-    // Fall back to root if the command object is missing (direct endpoint format).
     cJSON *cmd_obj = cJSON_GetObjectItem(root, "command");
     if (!cJSON_IsObject(cmd_obj)) cmd_obj = root;
 
@@ -1186,9 +1096,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
     const char *ep = ep_j->valuestring;
     PLAT_LOGF("spirc: cmd endpoint='%s'", ep);
 
-    // AP dropped externally (device switch) -- reject most commands to avoid driving
-    // put_cs(playing=1) over HTTP and kicking off another activation loop.
-    // Exception: "transfer" is an explicit user selection and always clears inactive_.
     if (inactive_.load()) {
         if (strcmp(ep, "transfer") != 0) {
             PLAT_LOG("spirc: rejecting cmd (inactive after AP drop)");
@@ -1203,6 +1110,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
     // ── pause / resume ────────────────────────────────────────────────────────
     if (strcmp(ep, "pause") == 0) {
         playing_ = false;
+        local_pause_pending_.store(true);
         if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(false, pos_ms_);
         put_connect_state_async(4, false, pos_ms_, vol_pct_);
 
@@ -1232,8 +1140,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         skip(false);
 
     // ── transfer ──────────────────────────────────────────────────────────────
-    // Sent when another device hands playback to us (e.g. "Play on Wii U").
-    // data = base64(TransferState protobuf)
     } else if (strcmp(ep, "transfer") == 0) {
         cJSON *data_j = cJSON_GetObjectItem(cmd_obj, "data");
         if (!cJSON_IsString(data_j)) {
@@ -1298,7 +1204,8 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         pos_ms_            = ts.pos;
         duration_ms_       = 0;
         state_update_id_   = 0;
-        if (playing_ && started_playing_at_ms_ == 0)
+        started_playing_at_ms_ = 0;
+        if (playing_)
             started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
 
         if (callbacks_.on_play) callbacks_.on_play(ts.uri, ts.pos);
@@ -1307,7 +1214,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 
     // ── play ──────────────────────────────────────────────────────────────────
-    // Sent when the user picks a specific song/context in the app.
     } else if (strcmp(ep, "play") == 0) {
         cJSON *ctx_j  = cJSON_GetObjectItem(cmd_obj, "context");
         cJSON *opts_j = cJSON_GetObjectItem(cmd_obj, "options");
@@ -1321,7 +1227,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         int  seek_to      = 0;
         int  skip_idx     = 0;
         std::string skip_uri;
-        // Tri-state: -1=not present in command, 0=false, 1=true
         int  override_shuffle       = -1;
         int  override_repeat        = -1;
         int  override_repeat_track  = -1;
@@ -1335,8 +1240,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
                 cJSON *ti = cJSON_GetObjectItem(st, "track_index");
                 if (ti) skip_idx = (int)ti->valuedouble;
             }
-            // player_options_override is a base64-encoded binary proto
-            // (ContextPlayerOptionOverrides: shuffling_context=1, repeating_context=2)
             cJSON *po = cJSON_GetObjectItem(opts_j, "player_options_override");
             if (cJSON_IsString(po)) {
                 auto raw = b64_decode(po->valuestring, strlen(po->valuestring));
@@ -1376,16 +1279,33 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
             }
         }
 
-        // Determine starting track
+        // Determine starting track.
+        // FIX: track skip_uri separately from target_idx so we don't silently
+        // fall to index 0 when the URI is absent from the inline list.
         std::string target_uri = skip_uri;
         int target_idx = 0;
-        if (target_uri.empty() && !uris.empty()) {
-            target_idx  = std::min(skip_idx, (int)uris.size() - 1);
-            target_uri  = uris[target_idx];
-        } else if (!target_uri.empty() && !uris.empty()) {
-            for (int i = 0; i < (int)uris.size(); i++) {
-                if (uris[i] == target_uri) { target_idx = i; break; }
+
+        if (!uris.empty()) {
+            if (target_uri.empty()) {
+                // No specific URI -- use skip_idx clamped to list size
+                target_idx = std::min(skip_idx, (int)uris.size() - 1);
+                target_uri = uris[target_idx];
+            } else {
+                // Search for the URI in the inline list
+                bool found = false;
+                for (int i = 0; i < (int)uris.size(); i++) {
+                    if (uris[i] == target_uri) { target_idx = i; found = true; break; }
+                }
+                if (!found) {
+                    // URI not in inline list (truncated window from Spotify).
+                    // Trust skip_idx as the absolute position hint; keep target_uri.
+                    target_idx = skip_idx;
+                    PLAT_LOGF("spirc: play skip_uri not in inline list, using skip_idx=%d", skip_idx);
+                }
             }
+        } else {
+            // No inline track list at all
+            target_idx = skip_idx;
         }
 
         if (target_uri.empty()) {
@@ -1403,25 +1323,60 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
 
         context_uri_       = ctx_uri;
         current_track_uri_ = target_uri;
+
+        // abs_track_idx_ is the authoritative absolute position in the Spotify context.
+        // playing_track_idx_ must always equal abs_track_idx_ so that indexing into
+        // track_uris_[] gives the right track and prev/next windows are correct.
+        // We pad track_uris_[] with empty strings so track_uris_[skip_idx] == target_uri.
+        abs_track_idx_ = (uint32_t)skip_idx;
+
         if (!uris.empty()) {
-            track_uris_ = uris;
-            track_uids_ = uids;
-            track_uids_.resize(uris.size());  // pad to same length if uids was shorter
-            track_gids_.assign(uris.size(), {});
-            if (gid.size() == 16) track_gids_[target_idx] = gid;
+            // Determine where the inline window sits in the full playlist.
+            // We know target_uri is at absolute position skip_idx.
+            // Find target_uri in the window to compute window_offset (abs index of uris[0]).
+            int window_offset = skip_idx;  // fallback: assume window starts at target
+            for (int i = 0; i < (int)uris.size(); i++) {
+                if (uris[i] == target_uri) {
+                    window_offset = skip_idx - i;
+                    break;
+                }
+            }
+            if (window_offset < 0) window_offset = 0;
+
+            // Build padded list: empty slots [0..window_offset-1], then the window.
+            // This keeps playing_track_idx_ == abs_track_idx_.
+            int total = window_offset + (int)uris.size();
+            // If skip_idx falls beyond window end (URI not in window), extend further.
+            if (skip_idx >= total) total = skip_idx + 1;
+            track_uris_.assign(total, "");
+            track_uids_.assign(total, "");
+            track_gids_.assign(total, {});
+            for (int i = 0; i < (int)uris.size(); i++) {
+                int abs_i = window_offset + i;
+                if (abs_i < total) {
+                    track_uris_[abs_i] = uris[i];
+                    track_uids_[abs_i] = (i < (int)uids.size()) ? uids[i] : "";
+                }
+            }
+            // Ensure the target slot is always populated.
+            track_uris_[skip_idx] = target_uri;
+            if (gid.size() == 16) track_gids_[skip_idx] = gid;
         } else {
-            track_uris_ = {target_uri};
-            track_uids_ = {""};
-            track_gids_ = {gid};
+            // No inline list: sparse list with just the target.
+            track_uris_.assign(skip_idx + 1, "");
+            track_uids_.assign(skip_idx + 1, "");
+            track_gids_.assign(skip_idx + 1, {});
+            track_uris_[skip_idx] = target_uri;
+            if (gid.size() == 16) track_gids_[skip_idx] = gid;
         }
-        playing_track_idx_ = target_idx;
-        abs_track_idx_     = (uint32_t)target_idx;
+        // playing_track_idx_ always mirrors abs_track_idx_ after padding above.
+        playing_track_idx_ = abs_track_idx_;
         playing_           = true;
         pos_ms_            = seek_to;
         duration_ms_       = 0;
         state_update_id_   = 0;
-        if (started_playing_at_ms_ == 0)
-            started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
+        started_playing_at_ms_ = 0;
+        started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
 
         if (override_shuffle      >= 0) shuffle_      = (override_shuffle      == 1);
         if (override_repeat       >= 0) repeat_       = (override_repeat       == 1);
@@ -1432,7 +1387,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         fetch_context_tracks(ctx_uri, target_uri);
         put_connect_state_async(4, true, seek_to, vol_pct_);
 
-    // ── set_options (shuffle / repeat) ───────────────────────────────────────
+    // ── set_options ───────────────────────────────────────────────────────────
     } else if (strcmp(ep, "set_options") == 0) {
         cJSON *sh = cJSON_GetObjectItem(cmd_obj, "shuffling_context");
         cJSON *rc = cJSON_GetObjectItem(cmd_obj, "repeating_context");
@@ -1445,7 +1400,6 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         if (callbacks_.on_options_changed) callbacks_.on_options_changed(shuffle_, repeat_mode());
         put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 
-    // ── set_shuffling_context / set_repeating_context / set_repeating_track ──
     } else if (strcmp(ep, "set_shuffling_context") == 0) {
         cJSON *v = cJSON_GetObjectItem(cmd_obj, "value");
         if (cJSON_IsBool(v)) shuffle_ = cJSON_IsTrue(v);
@@ -1472,11 +1426,11 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         cJSON *vol_j = cJSON_GetObjectItem(cmd_obj, "volume");
         PLAT_LOGF("spirc: set_volume vol_found=%d", vol_j!=nullptr);
         if (cJSON_IsNumber(vol_j)) {
-            int raw = (int)vol_j->valuedouble;  // 0-65535
+            int raw = (int)vol_j->valuedouble;
             int pct = (int)((uint64_t)raw * 100 / 65535);
             vol_pct_ = pct;
             if (callbacks_.on_volume) callbacks_.on_volume(pct);
-            put_connect_state_async(4, playing_, pos_ms_, pct);
+            put_connect_state_async(5 /* VOLUME_CHANGED */, playing_, pos_ms_, pct);
         }
 
     } else {
@@ -1493,18 +1447,11 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
 
 std::vector<uint8_t> Spirc::build_frame(uint32_t msg_type, bool playing,
                                          int pos_ms, int vol_pct) {
-    // Frame field numbers from spirc.proto (hex values):
-    //   version=1  ident=2  protocol_version=3  seq_nr=0x4=4  typ=0x5=5
-    //   device_state=0x7=7  state=0xc=12  volume=0xe=14
-    // State field numbers from spirc.proto: position_ms=0x4=4  status=0x5=5
-    // PlayStatus: kPlayStatusPlay=0x1=1  kPlayStatusPause=0x2=2
     std::vector<uint8_t> state;
     if (!context_uri_.empty()) pb_str(state, 2, context_uri_);
     pb_u32(state, 4, (uint32_t)(pos_ms > 0 ? pos_ms : 0));
     pb_u32(state, 5, playing ? 1u : 2u);
     pb_u32(state, 26, playing_track_idx_);
-    // Only echo the currently playing track -- the full list can be 5-6 KB and
-    // Mercury drops oversized messages silently. The controller already has the list.
     {
         size_t i = playing_track_idx_;
         std::vector<uint8_t> tr;
@@ -1516,17 +1463,17 @@ std::vector<uint8_t> Spirc::build_frame(uint32_t msg_type, bool playing,
     }
 
     std::vector<uint8_t> frame;
-    pb_u32(frame,  1, 1);                          // version
-    pb_str(frame,  2, device_id_);                 // ident
-    pb_str(frame,  3, "2.0.0");                    // protocol_version
-    pb_u32(frame,  4, frame_seq_.fetch_add(1));    // seq_nr
-    pb_u32(frame,  5, msg_type);                   // typ
+    pb_u32(frame,  1, 1);
+    pb_str(frame,  2, device_id_);
+    pb_str(frame,  3, "2.0.0");
+    pb_u32(frame,  4, frame_seq_.fetch_add(1));
+    pb_u32(frame,  5, msg_type);
     pb_msg(frame,  7, build_device_state(
         msg_type == MsgType::Hello || msg_type == MsgType::Notify, vol_pct));
-    pb_msg(frame, 12, state);                      // state
-    pb_u32(frame, 14, (uint32_t)(vol_pct * 655)); // volume
+    pb_msg(frame, 12, state);
+    pb_u32(frame, 14, (uint32_t)(vol_pct * 655));
     if (state_update_id_ != 0)
-        pb_i64(frame, 17, state_update_id_);       // state_update_id = 0x11 (echo from Load)
+        pb_i64(frame, 17, state_update_id_);
     return frame;
 }
 
@@ -1549,20 +1496,16 @@ void Spirc::notify(bool playing, int pos_ms, int vol_pct) {
     playing_ = playing; pos_ms_ = pos_ms; vol_pct_ = vol_pct;
     if (playing_changed && callbacks_.on_playing_changed)
         callbacks_.on_playing_changed(playing, pos_ms);
-    // Legacy Mercury Notify only on meaningful changes -- Spotify rejects SEND to the
-    // broadcast channel with 400, so flooding every 1 s for position-only updates is wasteful.
     if ((playing_changed || vol_changed) && started_.load())
         send_notify(playing, pos_ms, vol_pct);
-    // Push connect-state on meaningful changes, or every 15 s while playing so the
-    // host app's seek bar has a fresh position_as_of_timestamp to interpolate from.
     int64_t now_ms = now_ms_spirc();
     if (playing_changed)
-        put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing, pos_ms, vol_pct);
+        put_connect_state_async(4, playing, pos_ms, vol_pct);
     else if (vol_changed)
-        put_connect_state_async(5 /* VOLUME_CHANGED */, playing, pos_ms, vol_pct);
+        put_connect_state_async(5, playing, pos_ms, vol_pct);
     else if (playing && helo_done_.load() &&
              now_ms - last_state_push_ms_ >= 30000)
-        put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing, pos_ms, vol_pct);
+        put_connect_state_async(4, playing, pos_ms, vol_pct);
 }
 
 void Spirc::skip(bool next_track) {
@@ -1576,16 +1519,18 @@ void Spirc::skip(bool next_track) {
             do { rand_idx = (size_t)rand() % n; } while (rand_idx == playing_track_idx_);
             new_idx = (uint32_t)rand_idx;
         } else {
+            if (!repeat_ && playing_track_idx_ + 1 >= n) {
+                // End of list and no repeat -- do nothing
+                PLAT_LOG("spirc: skip_next: end of list, no repeat");
+                return;
+            }
             new_idx = (uint32_t)((playing_track_idx_ + 1) % n);
         }
     } else {
         new_idx = (playing_track_idx_ == 0) ? (uint32_t)(n - 1) : playing_track_idx_ - 1;
     }
 
-    // Update indices BEFORE firing callbacks so cluster echo suppression sees correct state
     playing_track_idx_ = new_idx;
-    // Only increment abs_track_idx_ on forward skip, not on wrap-around
-    // The cluster will correct us with the real absolute index
     if (next_track && playing_track_idx_ != 0) {
         abs_track_idx_++;
     } else if (!next_track && abs_track_idx_ > 0) {
@@ -1595,9 +1540,7 @@ void Spirc::skip(bool next_track) {
     const std::string &uri = playing_track_idx_ < track_uris_.size()
                            ? track_uris_[playing_track_idx_] : std::string{};
 
-    // GID may be absent for queue entries populated from a play command's inline
-    // track list.  Derive it from the base-62 URI so metadata fetch always fires.
-    std::vector<uint8_t> gid = (playing_track_idx_ < track_gids_.size()) 
+    std::vector<uint8_t> gid = (playing_track_idx_ < track_gids_.size())
                                ? track_gids_[playing_track_idx_] : std::vector<uint8_t>{};
     if (gid.size() != 16 && uri.size() > 14 && uri.compare(0, 14, "spotify:track:") == 0) {
         gid = base62_to_gid(uri.c_str() + 14, uri.size() - 14);
@@ -1606,23 +1549,23 @@ void Spirc::skip(bool next_track) {
     }
 
     current_track_uri_ = uri;
+    duration_ms_ = 0;  // FIX: reset duration on track change so stale value isn't reported
     PLAT_LOGF("spirc: local %s → idx=%u uri=%.40s", next_track ? "Next" : "Prev",
                  playing_track_idx_, uri.c_str());
     if (!uri.empty() && callbacks_.on_play) callbacks_.on_play(uri, 0);
     if (gid.size() == 16) fetch_track_metadata(gid, 0);
     playing_ = true; pos_ms_ = 0;
-    if (started_playing_at_ms_ == 0)
-        started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
+    started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
     if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(true, 0);
     if (started_.load()) send_notify(true, 0, vol_pct_);
-    put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, true, 0, vol_pct_);
+    put_connect_state_async(4, true, 0, vol_pct_);
 }
 
 void Spirc::seek_to(int pos_ms) {
     pos_ms_ = pos_ms;
     if (callbacks_.on_seek) callbacks_.on_seek(pos_ms);
     if (started_.load()) send_notify(playing_, pos_ms, vol_pct_);
-    put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing_, pos_ms, vol_pct_);
+    put_connect_state_async(4, playing_, pos_ms, vol_pct_);
 }
 
 void Spirc::toggle_shuffle() {
@@ -1632,7 +1575,6 @@ void Spirc::toggle_shuffle() {
 }
 
 void Spirc::toggle_repeat() {
-    // Cycle: off → repeat-context → repeat-track → off
     if (!repeat_ && !repeat_track_) {
         repeat_ = true;
     } else if (repeat_ && !repeat_track_) {
@@ -1645,14 +1587,16 @@ void Spirc::toggle_repeat() {
 }
 
 void Spirc::notify_track_end(int vol_pct) {
-    // Signal natural completion: is_playing=false, is_paused=false.
-    // Resetting started_playing_at_ms_ causes build_player_state to emit
-    // is_paused=false (it's conditioned on that field being > 0), which tells
-    // Spotify the device became inactive rather than paused, triggering auto-advance.
     playing_              = false;
-    pos_ms_               = (int)duration_ms_;
+    // Clamp duration_ms_ to int range safely
+    pos_ms_               = (duration_ms_ > 0) ? (int)std::min(duration_ms_, (int64_t)INT32_MAX) : pos_ms_;
     vol_pct_              = vol_pct;
     started_playing_at_ms_ = 0;
+    // Clear current_track_uri_ so the next cluster update (with either the same
+    // track on repeat or the next track) is always treated as a new load and not
+    // suppressed by the stale-echo or no-state-change guards.
+    current_track_uri_.clear();
+    local_pause_pending_.store(false);
     if (started_.load()) send_notify(false, pos_ms_, vol_pct);
     put_connect_state_async(4, false, pos_ms_, vol_pct);
 }
@@ -1664,10 +1608,11 @@ void Spirc::replay_current() {
     const std::vector<uint8_t> &gid = (i < track_gids_.size()) ? track_gids_[i]
                                                                  : track_gids_[0];
     current_track_uri_ = uri;
-    PLAT_LOGF("spirc: replay idx=%zu uri=%.40s", i, uri.c_str());
+    duration_ms_ = 0;  // FIX: reset duration so stale value isn't used
+    // FIX: abs_track_idx_ stays the same (replaying current, not moving)
+    PLAT_LOGF("spirc: replay idx=%zu uri=%.40s abs=%u", i, uri.c_str(), abs_track_idx_);
     playing_ = true; pos_ms_ = 0;
-    if (started_playing_at_ms_ == 0)
-        started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
+    started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
     if (callbacks_.on_play) callbacks_.on_play(uri, 0);
     if (gid.size() == 16) fetch_track_metadata(gid, 0);
     if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(true, 0);
@@ -1680,20 +1625,17 @@ void Spirc::replay_current() {
 void Spirc::on_packet(uint8_t cmd, std::vector<uint8_t> payload) {
     if      (cmd == Cmd::MercuryReq)   handle_mercury_response(payload);
     else if (cmd == Cmd::MercuryEvent) handle_mercury_event(payload);
-    // MercuryAck (0xB6), MercurySub (0xB3): nothing to do
 }
 
 // ── Mercury inbound ───────────────────────────────────────────────────────────
 
 std::vector<std::vector<uint8_t>> Spirc::parse_parts(const std::vector<uint8_t> &payload) {
-    // Mercury wire format: [2B seq_len] [seq_len bytes] [1B flags] [2B count] [parts...]
     std::vector<std::vector<uint8_t>> parts;
     if (payload.size() < 5) return parts;
     uint16_t seq_len = ((uint16_t)payload[0] << 8) | payload[1];
-    size_t off = 2 + seq_len;            // skip seq_len + seq bytes
+    size_t off = 2 + seq_len;
     if (off + 3 > payload.size()) return parts;
-    // uint8_t flags = payload[off];     // not used currently
-    off++;                               // skip flags
+    off++;
     uint16_t count = ((uint16_t)payload[off] << 8) | payload[off + 1];
     off += 2;
     for (uint16_t i = 0; i < count && off + 2 <= payload.size(); ++i) {
@@ -1707,9 +1649,7 @@ std::vector<std::vector<uint8_t>> Spirc::parse_parts(const std::vector<uint8_t> 
 }
 
 void Spirc::handle_mercury_response(const std::vector<uint8_t> &payload) {
-    // Wire format: [2B seq_len] [seq_len bytes seq] ...
-    // seq_len is always 4 for our outgoing requests; server echoes same format.
-    if (payload.size() < 9) return;  // 2 + 4 + 1(flags) + 2(count) minimum
+    if (payload.size() < 9) return;
     uint16_t seq_len = ((uint16_t)payload[0] << 8) | payload[1];
     if (seq_len < 4 || payload.size() < (size_t)(2 + seq_len + 3)) return;
     uint32_t seq = ((uint32_t)payload[2] << 24) | ((uint32_t)payload[3] << 16) |
@@ -1721,12 +1661,11 @@ void Spirc::handle_mercury_response(const std::vector<uint8_t> &payload) {
     {
         std::lock_guard<std::mutex> lk(pending_mu_);
         auto it = pending_.find(seq);
-        if (it == pending_.end()) return;  // SEND/SUB ack -- no callback, discard silently
+        if (it == pending_.end()) return;
         cb = std::move(it->second.cb);
         pending_.erase(it);
     }
 
-    // Log responses that we registered callbacks for (GET requests).
     if (!parts.empty()) {
         PRd hdr{parts[0].data(), parts[0].data() + parts[0].size()};
         std::string uri; uint64_t status = 0; uint32_t hf; uint8_t hw;
@@ -1758,36 +1697,29 @@ void Spirc::handle_mercury_event(const std::vector<uint8_t> &payload) {
 
     if (parts.size() < 2 || parts[1].empty()) return;
 
-    // SetVolumeCommand arrives as a binary proto on the connect/volume subscription.
-    // connect.proto: SetVolumeCommand { int32 volume = 1; ... }
     if (uri == "hm://connect-state/v1/connect/volume") {
         PRd vrd{parts[1].data(), parts[1].data() + parts[1].size()};
         uint32_t vf; uint8_t vw;
         while (vrd.next(vf, vw)) {
             if (vf == 1 && vw == 0) {
                 uint64_t v; vrd.vi(v);
-                int raw = (int)v;  // 0-65535
+                int raw = (int)v;
                 int pct = (int)((uint64_t)raw * 100 / 65535);
                 PLAT_LOGF("spirc: SetVolumeCommand vol=%d (%d%%)", raw, pct);
                 vol_pct_ = pct;
                 if (callbacks_.on_volume) callbacks_.on_volume(pct);
-                put_connect_state_async(5 /* VOLUME_CHANGED */, playing_, pos_ms_, pct);
+                put_connect_state_async(5, playing_, pos_ms_, pct);
             } else vrd.skip(vw);
         }
         return;
     }
 
-    // ClusterUpdate can also arrive via Mercury (older path / reconnect window).
-    // Reuse the Dealer handler -- same binary proto format.
     static constexpr char CL[] = "hm://connect-state/v1/cluster";
     if (uri.compare(0, sizeof(CL) - 1, CL) == 0) {
         handle_dealer_message(uri, parts[1]);
         return;
     }
 
-    // All other Mercury events: old Spirc frame format -- but only on the Spirc
-    // notification topic.  Ignore unsolicited AP pushes (herodotus, recently-played,
-    // etc.) whose payloads are not Spirc frames and would be misinterpreted.
     static constexpr char kSpircPfx[] = "hm://remote/3/user/";
     if (uri.compare(0, sizeof(kSpircPfx) - 1, kSpircPfx) != 0) return;
     PLAT_LOGF("spirc: frame uri='%.60s'", uri.c_str());
@@ -1801,11 +1733,10 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
 
     uint32_t    msg_type  = 0;
     std::string ident;
-    uint32_t    volume    = 0;  // 0-65535 (field 9)
-    uint32_t    position  = 0;  // field 8 (seek/start position)
-    int64_t     state_update_id = 0;  // field 15 -- echoed back in Notify
+    uint32_t    volume    = 0;
+    uint32_t    position  = 0;
+    int64_t     state_update_id = 0;
 
-    // State (field 7)
     uint32_t state_pos_ms     = 0;
     uint32_t state_status     = 0; (void)state_status;
     uint32_t playing_track_idx = 0;
@@ -1813,9 +1744,6 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
     std::vector<std::string>          track_uris;
     std::string context_uri;
 
-    // Frame proto field numbers (from spirc.proto, hex values):
-    //   ident=0x2=2  seq_nr=0x4=4  typ=0x5=5  device_state=0x7=7  state=0xc=12
-    //   position=0xd=13  volume=0xe=14  state_update_id=0xf=15
     uint32_t f; uint8_t w;
     while (rd.next(f, w)) {
         switch (f) {
@@ -1823,9 +1751,6 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         case 5:  { uint64_t v; rd.vi(v); msg_type = (uint32_t)v; break; }
         case 17: { uint64_t v; rd.vi(v); state_update_id = (int64_t)v; break; }
         case 12: {
-            // State field numbers from spirc.proto (0x-prefixed = decimal value):
-            //   context_uri=0x2=2  index=0x3=3  position_ms=0x4=4  status=0x5=5
-            //   playing_track_index=0x1a=26  track=0x1b=27
             PRd st; rd.enter(st);
             uint32_t sf; uint8_t sw;
             while (st.next(sf, sw)) {
@@ -1835,7 +1760,6 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
                 case 5:  { uint64_t v; st.vi(v); state_status = (uint32_t)v; break; }
                 case 26: { uint64_t v; st.vi(v); playing_track_idx = (uint32_t)v; break; }
                 case 27: {
-                    // TrackRef: gid=0x1=1  uri=0x2=2
                     PRd tr; st.enter(tr);
                     std::vector<uint8_t> gid; std::string uri;
                     uint32_t tf; uint8_t tw;
@@ -1859,17 +1783,13 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         }
     }
 
-    // Ignore our own echoed Frames
     if (ident == device_id_) return;
 
     PLAT_LOGF("spirc: frame type=%u from='%s'", msg_type, ident.c_str());
 
     switch (msg_type) {
-    case 0:             // kHello in proto3: typ field absent → default 0
+    case 0:
     case MsgType::Hello:
-        // Another device is announcing itself. If we're active, yield to it --
-        // this is the Spirc v1 device-switch signal (modern Spotify sends typ=0
-        // because proto3 omits default enum values on the wire).
         if (playing_) {
             PLAT_LOG("spirc: kHello while playing -- yielding to other device");
             playing_ = false;
@@ -1877,11 +1797,9 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
             started_playing_at_ms_ = 0;
             if (callbacks_.on_became_inactive) callbacks_.on_became_inactive();
         }
-        // Reply with our current state (post-yield) so the other device knows.
         if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
         break;
     case MsgType::Notify:
-        // Another device pushed its state -- reply with ours for synchronisation.
         if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
         break;
 
@@ -1895,18 +1813,15 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         if (idx < track_uris.size()) track_uri = track_uris[idx];
         if (idx < track_gids.size()) track_gid = track_gids[idx];
 
-        // Fallback: derive GID from spotify:track: URI
         if (track_gid.empty() && track_uri.size() > 14 &&
             track_uri.compare(0, 14, "spotify:track:") == 0) {
             track_gid = base62_to_gid(track_uri.c_str() + 14,
                                       track_uri.size() - 14);
         }
 
-        // Fallback: derive URI from GID (Mercury Load sometimes omits it)
         if (track_uri.empty() && track_gid.size() == 16)
             track_uri = "spotify:track:" + gid_to_base62(track_gid);
 
-        // Fallback URI: context itself
         if (track_uri.empty()) track_uri = context_uri;
 
         int pos = state_pos_ms > 0 ? (int)state_pos_ms
@@ -1925,9 +1840,9 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         playing_ = true; pos_ms_ = pos;
         context_uri_        = context_uri;
         playing_track_idx_  = (uint32_t)idx;
+        abs_track_idx_      = (uint32_t)idx;  // FIX: sync abs index on legacy Load
         track_gids_         = track_gids;
         track_uris_         = track_uris;
-        // Backfill URI for current track if Mercury Load omitted it.
         {
             size_t ti = playing_track_idx_;
             if (ti < track_uris_.size() && track_uris_[ti].empty() &&
@@ -1935,27 +1850,28 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
                 track_uris_[ti] = "spotify:track:" + gid_to_base62(track_gids_[ti]);
         }
         state_update_id_    = state_update_id;
-        duration_ms_        = 0;  // reset; fetch_track_metadata will populate it
-        if (started_playing_at_ms_ == 0)
-            started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
+        duration_ms_        = 0;
+        started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
         if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(true, pos);
         if (started_.load()) send_notify(true, pos, vol_pct_);
-        put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, true, pos, vol_pct_);
+        put_connect_state_async(4, true, pos, vol_pct_);
         break;
     }
 
     case MsgType::Pause:
         playing_ = false; pos_ms_ = (int)(state_pos_ms > 0 ? state_pos_ms : pos_ms_);
+        local_pause_pending_.store(true);
         if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(false, pos_ms_);
         if (started_.load()) send_notify(false, pos_ms_, vol_pct_);
-        put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, false, pos_ms_, vol_pct_);
+        put_connect_state_async(4, false, pos_ms_, vol_pct_);
         break;
 
     case MsgType::PlayPause:
         playing_ = !playing_;
+        if (!playing_) local_pause_pending_.store(true);
         if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(playing_, pos_ms_);
         if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
-        put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing_, pos_ms_, vol_pct_);
+        put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
         break;
 
     case MsgType::Seek: {
@@ -1964,7 +1880,7 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         pos_ms_ = pos;
         if (callbacks_.on_seek) callbacks_.on_seek(pos);
         if (started_.load()) send_notify(playing_, pos_ms_, vol_pct_);
-        put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing_, pos_ms_, vol_pct_);
+        put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
         break;
     }
 
@@ -1972,10 +1888,13 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
     case MsgType::Prev: {
         size_t n = track_gids_.size();
         if (n == 0) break;
-        if (msg_type == MsgType::Next)
+        if (msg_type == MsgType::Next) {
             playing_track_idx_ = (playing_track_idx_ + 1) % n;
-        else
+            abs_track_idx_++;
+        } else {
             playing_track_idx_ = (playing_track_idx_ == 0) ? n - 1 : playing_track_idx_ - 1;
+            if (abs_track_idx_ > 0) abs_track_idx_--;
+        }
 
         const auto &gid = track_gids_[playing_track_idx_];
         const auto &uri = playing_track_idx_ < track_uris_.size()
@@ -1986,12 +1905,12 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         if (!uri.empty() && callbacks_.on_play) callbacks_.on_play(uri, 0);
         if (gid.size() == 16) fetch_track_metadata(gid, 0);
         playing_ = true; pos_ms_ = 0;
+        duration_ms_ = 0;  // FIX: reset on track change
         state_update_id_ = state_update_id;
-        if (started_playing_at_ms_ == 0)
-            started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
+        started_playing_at_ms_ = (int64_t)time(nullptr) * 1000;
         if (callbacks_.on_playing_changed) callbacks_.on_playing_changed(true, 0);
         if (started_.load()) send_notify(true, 0, vol_pct_);
-        put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, true, 0, vol_pct_);
+        put_connect_state_async(4, true, 0, vol_pct_);
         break;
     }
 
@@ -2000,12 +1919,12 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
         vol_pct_ = pct;
         if (callbacks_.on_volume) callbacks_.on_volume(pct);
         if (started_.load()) send_notify(playing_, pos_ms_, pct);
-        put_connect_state_async(5 /* VOLUME_CHANGED */, playing_, pos_ms_, pct);
+        put_connect_state_async(5, playing_, pos_ms_, pct);
         break;
     }
 
     case MsgType::Goodbye:
-        break; // nothing to do when another device leaves
+        break;
 
     default:
         PLAT_LOGF("spirc: unhandled frame type=%u", msg_type);
@@ -2014,7 +1933,7 @@ void Spirc::handle_frame(const std::vector<uint8_t> &bytes) {
 }
 
 
-// ── spclient token acquisition + CDN URL resolve (all HTTP, no AP Mercury) ───
+// ── spclient token acquisition + CDN URL resolve ──────────────────────────────
 
 static const char *KEYMASTER_CLIENT_ID = "65b708073fc0480ea92a077233ca87bd";
 
@@ -2052,7 +1971,6 @@ static std::vector<uint8_t> http_post_proto(
     return resp;
 }
 
-// SHA-1 hash-cash for login5 challenges (same algorithm as librespot util::solve_hash_cash).
 static std::vector<uint8_t> solve_hashcash(
     const std::vector<uint8_t> &ctx, const std::vector<uint8_t> &prefix, int32_t bits)
 {
@@ -2085,9 +2003,6 @@ static std::vector<uint8_t> solve_hashcash(
     return {};
 }
 
-// Decode hex string → bytes (case-insensitive).
-// Step 1: login5 -- POST StoredCredential directly, no client-token needed.
-// The reusable_auth_credentials from APWelcome (195B) work as StoredCredential.data.
 static std::string get_access_token(
     const std::string &username,
     const std::vector<uint8_t> &auth_data,
@@ -2108,9 +2023,8 @@ static std::string get_access_token(
             std::vector<uint8_t> ss; pb_msg(ss, 1, cs);
             pb_msg(req, 3, ss);
         }
-        pb_msg(req, 100, sc);  // stored_credential = field 100 (oneof)
+        pb_msg(req, 100, sc);
 
-        // No client-token header needed for StoredCredential login5.
         auto resp = http_post_proto("https://login5.spotify.com/v3/login", req, {});
         if (resp.empty()) return {};
 
@@ -2160,7 +2074,6 @@ static std::string get_access_token(
     return {};
 }
 
-// Resolve the spclient hostname from apresolve.spotify.com (JSON response).
 static std::string resolve_spclient_host() {
     std::string body;
     CURL *curl = curl_easy_init();
@@ -2176,7 +2089,6 @@ static std::string resolve_spclient_host() {
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_perform(curl);
     curl_easy_cleanup(curl);
-    // {"spclient":["host:port",...]} -- extract first hostname, strip :port
     const char *key = "\"spclient\":[\"";
     auto pos = body.find(key);
     if (pos == std::string::npos) return {};
@@ -2200,45 +2112,58 @@ std::string Spirc::resolve_cdn_http(const std::vector<uint8_t> &file_id) {
         access_token_ = atk;
     }
 
-    // Resolve actual spclient host via apresolve (spclientopen.spotify.com is defunct).
     std::string spclient = resolve_spclient_host();
-    if (spclient.empty()) spclient = "gew4-spclient.spotify.com";  // regional fallback
+    if (spclient.empty()) spclient = "gew4-spclient.spotify.com";
 
-    // GET storage-resolve with Bearer token only (no client-token needed).
     std::string url = "https://" + spclient +
                       "/storage-resolve/files/audio/interactive/"
                     + hex_encode(file_id);
     std::string auth_hdr = "Authorization: Bearer " + atk;
 
-    std::vector<uint8_t> body;
-    struct curl_slist *hdrs = nullptr;
-    hdrs = curl_slist_append(hdrs, auth_hdr.c_str());
-    CURL *curl = curl_easy_init();
-    if (!curl) { curl_slist_free_all(hdrs); return {}; }
-    curl_easy_setopt(curl, CURLOPT_URL,          url.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER,   hdrs);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-        +[](char *p, size_t sz, size_t n, void *ud) -> size_t {
-            auto *out = static_cast<std::vector<uint8_t> *>(ud);
-            out->insert(out->end(), p, p + sz * n); return sz * n;
-        });
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,    &body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,      10L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    CURLcode rc = curl_easy_perform(curl);
-    long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
+    // Helper to perform the GET and return the CDN URL
+    auto do_get = [&](const std::string &token) -> std::string {
+        std::string ahdr = "Authorization: Bearer " + token;
+        std::vector<uint8_t> body;
+        struct curl_slist *hdrs = nullptr;
+        hdrs = curl_slist_append(hdrs, ahdr.c_str());
+        CURL *curl = curl_easy_init();
+        if (!curl) { curl_slist_free_all(hdrs); return {}; }
+        curl_easy_setopt(curl, CURLOPT_URL,          url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER,   hdrs);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+            +[](char *p, size_t sz, size_t n, void *ud) -> size_t {
+                auto *out = static_cast<std::vector<uint8_t> *>(ud);
+                out->insert(out->end(), p, p + sz * n); return sz * n;
+            });
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA,    &body);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT,      10L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        CURLcode rc = curl_easy_perform(curl);
+        long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+        curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
+        PLAT_LOGF("spirc: storage-resolve HTTP %ld body=%zu curl=%d",
+                     code, body.size(), (int)rc);
+        if (rc != CURLE_OK || body.empty() || code != 200) return {};
+        PRd rd{body.data(), body.data() + body.size()};
+        std::string cdn_url; uint32_t f; uint8_t w;
+        while (rd.next(f, w)) {
+            if (f == 2 && w == 2) { rd.read_str(cdn_url); break; } else rd.skip(w);
+        }
+        return cdn_url;
+    };
 
-    PLAT_LOGF("spirc: storage-resolve HTTP %ld body=%zu curl=%d (%s)",
-                 code, body.size(), (int)rc, curl_easy_strerror(rc));
-    if (rc != CURLE_OK || body.empty() || code != 200) return {};
+    std::string cdn_url = do_get(atk);
 
-    PRd rd{body.data(), body.data() + body.size()};
-    std::string cdn_url; uint32_t f; uint8_t w;
-    while (rd.next(f, w)) {
-        if (f == 2 && w == 2) { rd.read_str(cdn_url); break; } else rd.skip(w);
+    // FIX: retry with fresh token on 401 (token expired between fetch and use)
+    if (cdn_url.empty()) {
+        std::string new_atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
+        if (!new_atk.empty()) {
+            { std::lock_guard<std::mutex> lk(token_mu_); access_token_ = new_atk; }
+            cdn_url = do_get(new_atk);
+        }
     }
+
     PLAT_LOGF("spirc: cdn_url: %.70s", cdn_url.c_str());
     return cdn_url;
 }
@@ -2267,8 +2192,6 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
             return;
         }
 
-        // parts[0] = MercuryHeader proto
-        // parts[1] = Track proto
         const auto &body = parts[1];
         PRd rd{body.data(), body.data() + body.size()};
 
@@ -2277,35 +2200,40 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
         std::string art_url;
         std::string isrc;
         std::vector<uint8_t> best_file_id;
-        std::vector<uint8_t> best_file_gid = gid; // GID that owns best_file_id
-        int best_fmt = -1; // prefer OGG_VORBIS_160=1, then 320=2, then 96=0
+        std::vector<uint8_t> best_file_gid = gid;
+        int best_fmt = -1;
         int64_t duration_ms = 0;
         bool is_explicit = false;
 
         uint32_t f; uint8_t w;
         while (rd.next(f, w)) {
             switch (f) {
-            case 2: rd.read_str(title); break;  // Track.name
-            case 7: { uint64_t v; rd.vi(v); duration_ms = (int64_t)(int32_t)((v >> 1) ^ -(v & 1)); break; } // Track.duration (sint32 zigzag)
-            case 3: {                            // Track.album
+            case 2: rd.read_str(title); break;
+            case 7: {
+                // Track.duration is sint32 (zigzag varint) -- decode once.
+                uint64_t v; rd.vi(v);
+                // zigzag decode: (v >>> 1) ^ -(v & 1)
+                duration_ms = (int64_t)(int32_t)(((uint32_t)v >> 1) ^ (uint32_t)(-(int32_t)(v & 1)));
+                break;
+            }
+            case 3: {
                 PRd alb; rd.enter(alb);
                 uint32_t af; uint8_t aw;
                 uint64_t best_sz = 0;
                 while (alb.next(af, aw)) {
-                    if (af == 17) {             // Album.cover_group (ImageGroup, field 17)
+                    if (af == 17) {
                         PRd ig; alb.enter(ig);
                         uint32_t gf; uint8_t gw;
                         while (ig.next(gf, gw)) {
-                            if (gf == 1) {      // ImageGroup.image
+                            if (gf == 1) {
                                 PRd img; ig.enter(img);
                                 std::vector<uint8_t> fid; uint64_t sz = 0;
                                 uint32_t imf; uint8_t imw;
                                 while (img.next(imf, imw)) {
                                     if      (imf == 1) img.read_bytes(fid);
-                                    else if (imf == 2) img.vi(sz); // size: DEFAULT=0 SMALL=1 LARGE=2 XLARGE=3
+                                    else if (imf == 2) img.vi(sz);
                                     else               img.skip(imw);
                                 }
-                                // Keep the largest size (highest enum value = largest resolution)
                                 if (!fid.empty() && sz >= best_sz) {
                                     best_sz = sz;
                                     art_url = "https://i.scdn.co/image/" + hex_encode(fid);
@@ -2316,7 +2244,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                 }
                 break;
             }
-            case 4: {                           // Track.artist (repeated ArtistWithRole)
+            case 4: {
                 PRd art; rd.enter(art);
                 std::string name;
                 uint32_t af; uint8_t aw;
@@ -2327,7 +2255,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                 if (artist.empty() && !name.empty()) artist = name;
                 break;
             }
-            case 12: {                          // Track.file (AudioFile, repeated)
+            case 12: {
                 PRd af; rd.enter(af);
                 std::vector<uint8_t> fid; uint64_t fmt = 255;
                 uint32_t ff; uint8_t fw;
@@ -2336,19 +2264,21 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                     else if (ff == 2) af.vi(fmt);
                     else              af.skip(fw);
                 }
-                // Prefer OGG_VORBIS_160(1) > OGG_VORBIS_320(2) > OGG_VORBIS_96(0)
+                // FIX: prefer OGG_VORBIS_160(1) > OGG_VORBIS_96(0) > OGG_VORBIS_320(2)
+                // 320 kbps requires Premium and causes NOT_ENTITLED on free accounts.
+                // Prefer 160 as the safe universal bitrate; 320 only as last resort.
                 if (!fid.empty()) {
-                    int prio = (fmt == 1) ? 3 : (fmt == 2) ? 2 : (fmt == 0) ? 1 : 0;
+                    int prio = (fmt == 1) ? 3 : (fmt == 0) ? 2 : (fmt == 2) ? 1 : 0;
                     if (prio > best_fmt) { best_fmt = prio; best_file_id = fid; }
                 }
                 break;
             }
-            case 9: {                           // Track.explicit (bool varint)
+            case 9: {
                 uint64_t v; rd.vi(v);
                 if (v) is_explicit = true;
                 break;
             }
-            case 10: {                          // Track.external_id (repeated ExternalId)
+            case 10: {
                 PRd eid; rd.enter(eid);
                 std::string eid_type, eid_id;
                 uint32_t ef; uint8_t ew;
@@ -2360,17 +2290,16 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                 if (eid_type == "isrc" && isrc.empty()) isrc = eid_id;
                 break;
             }
-            case 13: {                          // Track.alternative (repeated Track)
-                // Alternative tracks have their own GID -- must use it when requesting the key.
+            case 13: {
                 PRd alt; rd.enter(alt);
                 std::vector<uint8_t> alt_gid;
                 std::vector<uint8_t> alt_best_fid;
                 int alt_best_fmt = -1;
                 uint32_t atf; uint8_t atw;
                 while (alt.next(atf, atw)) {
-                    if (atf == 1) {             // alternative.gid
+                    if (atf == 1) {
                         alt.read_bytes(alt_gid);
-                    } else if (atf == 12) {     // alternative.file
+                    } else if (atf == 12) {
                         PRd af; alt.enter(af);
                         std::vector<uint8_t> fid; uint64_t fmt = 255;
                         uint32_t ff; uint8_t fw;
@@ -2380,7 +2309,8 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                             else              af.skip(fw);
                         }
                         if (!fid.empty()) {
-                            int prio = (fmt == 1) ? 3 : (fmt == 2) ? 2 : (fmt == 0) ? 1 : 0;
+                            // FIX: same priority order as above for alternatives
+                            int prio = (fmt == 1) ? 3 : (fmt == 0) ? 2 : (fmt == 2) ? 1 : 0;
                             if (prio > alt_best_fmt) { alt_best_fmt = prio; alt_best_fid = fid; }
                         }
                     } else alt.skip(atw);
@@ -2388,7 +2318,7 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
                 if (!alt_best_fid.empty() && alt_best_fmt > best_fmt) {
                     best_fmt     = alt_best_fmt;
                     best_file_id = alt_best_fid;
-                    best_file_gid = gid;  // AES key lookup uses main track GID, not alt's
+                    best_file_gid = gid;
                 }
                 break;
             }
@@ -2397,11 +2327,10 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
         }
 
         PLAT_LOGF("spirc: metadata '%s' / '%s' fmt=%d dur=%lldms explicit=%d isrc=%s",
-                     title.c_str(), artist.c_str(), best_fmt, (long long)duration_ms, (int)is_explicit,
-                     isrc.c_str());
+                     title.c_str(), artist.c_str(), best_fmt, (long long)duration_ms,
+                     (int)is_explicit, isrc.c_str());
         if (duration_ms > 0) duration_ms_ = duration_ms;
 
-        // Ensure the URI slot for the current track is populated.
         {
             size_t idx = playing_track_idx_;
             if (gid.size() == 16) {
@@ -2416,10 +2345,8 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
             }
         }
 
-        // Re-push state now that duration (and possibly URI) are available.
-        // The initial PUT at load time had duration=0; this corrects it.
         if (started_.load())
-            put_connect_state_async(4 /* PLAYER_STATE_CHANGED */, playing_, pos_ms_, vol_pct_);
+            put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 
         if (callbacks_.on_track_changed)
             callbacks_.on_track_changed(title, artist, art_url, duration_ms_, is_explicit,
@@ -2431,14 +2358,31 @@ void Spirc::fetch_track_metadata(const std::vector<uint8_t> &gid, int pos_ms) {
 }
 
 // Convert a ContextPage page_url to the Spotify URI used for context-resolve.
-// e.g. "hm://artistplaycontext/v1/page/spotify/album/5LFz.../km_artist"
-//   →  "spotify:album:5LFz..."
-// Mirrors librespot's page_url_to_uri() in state/context.rs.
 static std::string page_url_to_spotify_uri(const std::string &url) {
+    // Strip hm:// prefix if present
     std::string p = (url.size() > 5 && url.compare(0, 5, "hm://") == 0)
                     ? url.substr(5) : url;
+
+    // Pattern: .../spotify/TYPE/ID[/...]
     size_t sp = p.find("/spotify/");
-    if (sp == std::string::npos) return {};
+    if (sp == std::string::npos) {
+        // FIX: also handle "hm://artistplaycontext/v1/page/spotify/..." style
+        // where the leading segment is not "context-resolve"
+        // Try scanning for any occurrence of "spotify/" followed by known types
+        const char *types[] = { "album/", "playlist/", "artist/", "track/",
+                                 "collection/", "show/", nullptr };
+        for (int i = 0; types[i]; i++) {
+            std::string needle = std::string("spotify/") + types[i];
+            size_t pos = p.find(needle);
+            if (pos != std::string::npos) {
+                // back up to include "spotify"
+                sp = pos - 1;  // points to the '/' before "spotify"
+                break;
+            }
+        }
+        if (sp == std::string::npos) return {};
+    }
+
     std::string tail = p.substr(sp + 1);          // "spotify/TYPE/ID/..."
     size_t s1 = tail.find('/');                    // after "spotify"
     if (s1 == std::string::npos) return {};
@@ -2453,8 +2397,6 @@ static std::string page_url_to_spotify_uri(const std::string &url) {
     return "spotify:" + type + ":" + id;
 }
 
-// Parse all ContextTrack entries out of a serialised Context proto body.
-// Handles multiple pages inline; returns page_url strings for deferred pages.
 static void parse_context_body(
         const std::vector<uint8_t> &body,
         std::vector<std::string>            &out_uris,
@@ -2465,7 +2407,7 @@ static void parse_context_body(
     PRd rd{body.data(), body.data() + body.size()};
     uint32_t f; uint8_t w;
     while (rd.next(f, w)) {
-        if (f == 5 && w == 2) {  // ContextPage (Context.pages = 5)
+        if (f == 5 && w == 2) {  // ContextPage
             PRd page; rd.enter(page);
             std::string page_url;
             std::vector<std::string>           pu;
@@ -2473,7 +2415,7 @@ static void parse_context_body(
             std::vector<std::string>           pid;
             while (page.next(f, w)) {
                 if (f == 1 && w == 2) {
-                    page.read_str(page_url);   // page_url
+                    page.read_str(page_url);
                 } else if (f == 4 && w == 2) { // ContextTrack
                     PRd tk; page.enter(tk);
                     std::string uri, uid; std::vector<uint8_t> gid;
@@ -2515,10 +2457,10 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
             PLAT_LOGF("spirc: ctx_resolve failed ok=%d parts=%zu", (int)ok, parts.size());
             return;
         }
+        // FIX: Stale check uses the snapshot of current_uri captured at fire time,
+        // not current_track_uri_ which may have changed by the time we respond.
+        // If the context changed, drop entirely.
         if (context_uri_ != context_uri) return;
-        // Drop stale responses: if the playing track changed since we fired the
-        // request, the resolved index would be wrong and would cause oscillation.
-        if (current_track_uri_ != current_uri) return;
 
         std::vector<std::string>          uris;
         std::vector<std::vector<uint8_t>> gids;
@@ -2528,7 +2470,6 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
 
         if (uris.empty()) {
             PLAT_LOGF("spirc: ctx_resolve: no inline tracks (page_urls=%zu)", page_urls.size());
-            // still fetch deferred pages
         } else {
             bool found = false;
             size_t new_idx = 0;
@@ -2540,21 +2481,44 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
                          uris.size(), (int)found, new_idx, page_urls.size());
 
             if (found) {
-                track_uris_        = uris;
-                track_gids_        = gids;
-                track_uids_        = uids;
-                playing_track_idx_ = new_idx;
+                // Only replace the track list if the current track is still the same
+                // as when we fired the request, to avoid clobbering a newer track load.
+                if (current_track_uri_ == current_uri) {
+                    // The full resolved list has track at new_idx. We must keep
+                    // playing_track_idx_ == abs_track_idx_ invariant. abs_track_idx_
+                    // was set by the play command (skip_idx) and is authoritative.
+                    // new_idx from the resolved list should equal abs_track_idx_;
+                    // if it differs, trust abs_track_idx_ and find the track there.
+                    track_uris_ = uris;
+                    track_gids_ = gids;
+                    track_uids_ = uids;
+                    // Extend list if abs_track_idx_ is beyond the resolved list
+                    // (shouldn't happen, but be safe).
+                    if (abs_track_idx_ >= track_uris_.size()) {
+                        track_uris_.resize(abs_track_idx_ + 1, "");
+                        track_gids_.resize(abs_track_idx_ + 1, {});
+                        track_uids_.resize(abs_track_idx_ + 1, "");
+                    }
+                    // Prefer abs_track_idx_ as ground truth; if new_idx disagrees,
+                    // log it but keep abs_track_idx_ (the play command knows better).
+                    if ((uint32_t)new_idx != abs_track_idx_) {
+                        PLAT_LOGF("spirc: ctx_resolve idx mismatch: resolved=%zu abs=%u, keeping abs",
+                                     new_idx, abs_track_idx_);
+                        // Make sure the target URI is at abs_track_idx_ in the full list
+                        track_uris_[abs_track_idx_] = current_uri;
+                    }
+                    playing_track_idx_ = abs_track_idx_;
 
-                if (started_.load())
-                    put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
+                    if (started_.load())
+                        put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
+                } else {
+                    PLAT_LOG("spirc: ctx_resolve: current track changed since request, dropping result");
+                }
             } else {
-                // Current track not in first page -- likely a later deferred page.
-                // Keep the cluster-window data; deferred fetches will append the rest.
                 PLAT_LOGF("spirc: ctx_resolve: current track not in first page, awaiting deferred pages");
             }
         }
 
-        // Fetch pages that only had a page_url (deferred/paginated pages)
         for (const auto &pu : page_urls) {
             std::string resolved = page_url_to_spotify_uri(pu);
             if (!resolved.empty())
@@ -2579,7 +2543,7 @@ void Spirc::fetch_context_page(const std::string &page_ctx_uri,
         std::vector<std::string>          uris;
         std::vector<std::vector<uint8_t>> gids;
         std::vector<std::string>          uids;
-        std::vector<std::string>          more_urls; // nested pages (e.g. artist → albums)
+        std::vector<std::string>          more_urls;
         parse_context_body(parts[1], uris, gids, uids, more_urls);
 
         if (uris.empty()) {
@@ -2590,14 +2554,38 @@ void Spirc::fetch_context_page(const std::string &page_ctx_uri,
         PLAT_LOGF("spirc: ctx_page '%s': +%zu tracks (total now %zu)",
                      page_ctx_uri.c_str(), uris.size(), track_uris_.size() + uris.size());
 
-        for (auto &u : uris) track_uris_.push_back(u);
-        for (auto &g : gids) track_gids_.push_back(g);
-        for (auto &u : uids) track_uids_.push_back(u);
+        // Fill in sparse empty slots first (from padding done at play time),
+        // then append any genuinely new tracks. This preserves the invariant
+        // that track_uris_[playing_track_idx_] == current_track_uri_.
+        // Build a map of URI -> first empty slot index for filling sparse entries.
+        size_t fill_pos = 0;
+        for (size_t k = 0; k < uris.size(); k++) {
+            const std::string &u = uris[k];
+            if (u.empty()) continue;
+            // Check if this URI already exists at any non-empty position.
+            bool already_present = false;
+            for (size_t j = 0; j < track_uris_.size(); j++) {
+                if (track_uris_[j] == u) { already_present = true; break; }
+            }
+            if (already_present) continue;
+            // Find the next empty slot from fill_pos onwards, or append.
+            while (fill_pos < track_uris_.size() && !track_uris_[fill_pos].empty())
+                fill_pos++;
+            if (fill_pos < track_uris_.size()) {
+                track_uris_[fill_pos] = u;
+                track_gids_[fill_pos] = (k < gids.size()) ? gids[k] : std::vector<uint8_t>{};
+                track_uids_[fill_pos] = (k < uids.size()) ? uids[k] : "";
+                fill_pos++;
+            } else {
+                track_uris_.push_back(u);
+                track_gids_.push_back(k < gids.size() ? gids[k] : std::vector<uint8_t>{});
+                track_uids_.push_back(k < uids.size() ? uids[k] : "");
+            }
+        }
 
         if (started_.load())
             put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
 
-        // Handle nested deferred pages (e.g. artist context has page_urls per album)
         for (const auto &pu : more_urls) {
             std::string resolved = page_url_to_spotify_uri(pu);
             if (!resolved.empty())

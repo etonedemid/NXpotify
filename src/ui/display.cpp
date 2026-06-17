@@ -2,7 +2,7 @@
 #include "theme.h"
 #include "font_data.h"
 #include "../connect/audio.h"
-#include "../olv/olv.h"
+
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -125,10 +125,8 @@ void Display::shutdown() {
     lc_pos_.free();   lc_dur_.free();   lc_vol_.free();
     lc_shuf_.free();  lc_rep_.free();   lc_xtal_.free();  lc_bhint_.free();
     lc_wait_[0].free(); lc_wait_[1].free();
-    lc_olv_header_.free(); lc_olv_body_.free();
     if (bg_tex_)       { SDL_DestroyTexture(bg_tex_);       bg_tex_       = nullptr; }
     if (art_tex_)      { SDL_DestroyTexture(art_tex_);      art_tex_      = nullptr; }
-    if (olv_memo_tex_)  { SDL_DestroyTexture(olv_memo_tex_);  olv_memo_tex_  = nullptr; }
     if (login_qr_tex_)  { SDL_DestroyTexture(login_qr_tex_);  login_qr_tex_  = nullptr; }
     if (font_sm_)    TTF_CloseFont(font_sm_);
     if (font_md_)    TTF_CloseFont(font_md_);
@@ -231,29 +229,6 @@ void Display::toggle_controls() {
     std::lock_guard<std::mutex> lk(mu_); controls_ = !controls_;
 }
 
-void Display::set_olv_post(const OLVPost *post) {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (!post) {
-        olv_visible_       = false;
-        olv_body_          = "";
-        olv_header_        = "";
-        olv_memo_pending_.clear();
-        olv_memo_dirty_    = true;
-        return;
-    }
-    olv_visible_ = true;
-    olv_body_    = post->body;
-
-    // Build header line:  @ScreenName  :)
-    const char *feeling = (post->feeling >= 0 && post->feeling <= 5)
-                        ? OLV::FEELING_STR[post->feeling] : "";
-    olv_header_ = "@" + post->screen_name;
-    if (feeling && feeling[0]) { olv_header_ += "  "; olv_header_ += feeling; }
-
-    olv_memo_pending_ = post->memo;
-    olv_memo_dirty_   = true;
-}
-
 // ── render (main thread) ──────────────────────────────────────────────────────
 
 void Display::render() {
@@ -290,45 +265,6 @@ void Display::render() {
         }
     }
 
-    // Upload pending OLV drawing texture (GPU ops must be on main thread)
-    {
-        bool dirty = false;
-        std::vector<uint8_t> memo_data;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (olv_memo_dirty_) {
-                olv_memo_dirty_ = false;
-                dirty = true;
-                memo_data = std::move(olv_memo_pending_);
-            }
-        }
-        if (dirty && tv_ren_) {
-            if (olv_memo_tex_) { SDL_DestroyTexture(olv_memo_tex_); olv_memo_tex_ = nullptr; }
-            if (!memo_data.empty()) {
-                // TGA: 18-byte header, then 320×120 pixels in BGRA order from bottom-left row.
-                // Flip vertically and swap B/R channels to get top-left RGBA for SDL.
-                constexpr int MW = 320, MH = 120, HDR = 18;
-                if (memo_data.size() >= (size_t)(HDR + MW * MH * 4)) {
-                    const uint8_t *src = memo_data.data() + HDR;
-                    std::vector<uint8_t> rgba(MW * MH * 4);
-                    for (int row = 0; row < MH; ++row) {
-                        const uint8_t *s = src + (MH - 1 - row) * MW * 4;
-                        uint8_t       *d = rgba.data() + row * MW * 4;
-                        for (int x = 0; x < MW; ++x, s += 4, d += 4) {
-                            d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
-                        }
-                    }
-                    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
-                        rgba.data(), MW, MH, 32, MW * 4, SDL_PIXELFORMAT_RGBA32);
-                    if (surf) {
-                        olv_memo_tex_ = SDL_CreateTextureFromSurface(tv_ren_, surf);
-                        SDL_FreeSurface(surf);
-                        PLAT_LOG("display: olv drawing loaded");
-                    }
-                }
-            }
-        }
-    }
 
     // Upload pending QR code texture (GPU ops must be on main thread)
     {
@@ -456,14 +392,13 @@ void Display::draw_label(SDL_Renderer *r, const CachedLabel &lbl, int x, int y, 
 // Snapshots state under mu_, then renders while NOT holding the lock.
 
 void Display::render_to(SDL_Renderer *r, int w, int h) {
-    bool snap_waiting, snap_connecting, snap_controls, snap_olv, snap_login, snap_handheld;
+    bool snap_waiting, snap_connecting, snap_controls, snap_login, snap_handheld;
     std::string snap_login_code;
     {
         std::lock_guard<std::mutex> lk(mu_);
         snap_waiting    = waiting_;
         snap_connecting = connecting_;
         snap_controls   = controls_;
-        snap_olv        = olv_visible_;
         snap_error_     = error_msg_;
         snap_login      = login_;
         snap_login_code = login_code_;
@@ -481,9 +416,6 @@ void Display::render_to(SDL_Renderer *r, int w, int h) {
     else if (snap_controls) render_controls(r, w, h);
     else if (snap_waiting)  render_waiting(r, w, h, snap_connecting);
     else                    render_playing(r, w, h, snap_handheld);
-
-    // OLV card overlays the bottom strip when visible (independent of controls/waiting)
-    if (snap_olv && !snap_controls && !snap_login) render_olv_card(r, w, h);
 }
 
 void Display::render_login(SDL_Renderer *r, int w, int h) {
@@ -696,9 +628,9 @@ void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
             loudness_db = loudness_db_;
         }
 
-        int vis_left  = S(Theme::TEXT_X);
+        int vis_left  = Theme::BAR_X;
         int vis_right = S(Theme::BAR_X + Theme::BAR_W);
-        int vis_w     = vis_right - vis_left;
+        int vis_w     = Theme::BAR_W;
         int vis_bot   = S(Theme::BAR_Y) - S(10);
         int vis_h     = S(110);
         int slot_w    = vis_w / SPEC_BARS;
@@ -708,8 +640,7 @@ void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
             int   bh_v  = (int)(norm * vis_h);
             if (bh_v < 1) continue;
             float hue     = (float)b / (SPEC_BARS - 1) * 270.0f;
-            SDL_Color col = hsv_to_sdl(hue, 0.85f, 0.90f);
-            SDL_SetRenderDrawColor(r, col.r, col.g, col.b, 255);
+            SDL_SetRenderDrawColor(r, 180, 180, 180, 255);
             SDL_Rect rect = { vis_left + b * slot_w, vis_bot - bh_v, slot_w - gap, bh_v };
             SDL_RenderFillRect(r, &rect);
         }
@@ -1035,73 +966,6 @@ void Display::art_worker() {
             art_pending_data_ = std::move(data);
             art_ready_        = true;
         }
-    }
-}
-
-// ── Roséverse OLV post card ───────────────────────────────────────────────────
-// Sits in the text column (TEXT_X..BAR_X+BAR_W) below the artist name.
-
-void Display::render_olv_card(SDL_Renderer *r, int w, int h) {
-    std::string hdr, body;
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!olv_visible_) return;
-        hdr  = olv_header_;
-        body = olv_body_;
-    }
-    if (hdr.empty() && body.empty() && !olv_memo_tex_) return;
-
-    float s = w / 1280.0f;
-    auto  S = [&](int v) { return (int)(v * s); };
-
-    const int card_x  = S(Theme::TEXT_X);
-    const int card_y  = S(Theme::ARTIST_Y + 60);  // ~230 at 1280 scale
-    const int card_w  = S(Theme::BAR_X + Theme::BAR_W - Theme::TEXT_X);
-
-    // Drawing rendered at half native size: 160×60 (preserves 320:120 = 8:3 aspect)
-    const int draw_w = S(160), draw_h = S(60);
-
-    // Card height grows to fit: header row + optional drawing + optional body text
-    int card_h = S(22);  // header
-    if (olv_memo_tex_) card_h += draw_h + S(4);
-    if (!body.empty())  card_h += S(22);
-    card_h += S(6);  // bottom padding
-
-    // Dark semi-transparent card background
-    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(r, 20, 10, 30, 210);
-    SDL_Rect bg = { card_x, card_y, card_w, card_h };
-    SDL_RenderFillRect(r, &bg);
-    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-
-    // Accent left-edge bar
-    SDL_SetRenderDrawColor(r, Theme::ACCENT.r, Theme::ACCENT.g, Theme::ACCENT.b, 255);
-    SDL_Rect bar = { card_x, card_y, S(3), card_h };
-    SDL_RenderFillRect(r, &bar);
-
-    const int tx = card_x + S(12);
-    const int mw = card_w - S(16);
-    int cy = card_y + S(6);
-
-    // Header: "Miiverse  @name  :)" -- accent colour, small font
-    if (font_sm_) {
-        std::string full_hdr = "Miiverse  " + hdr;
-        update_label(lc_olv_header_, r, font_sm_, full_hdr.c_str(), Theme::ACCENT, mw);
-        draw_label(r, lc_olv_header_, tx, cy);
-    }
-    cy += S(16);
-
-    // Drawing (if present)
-    if (olv_memo_tex_) {
-        SDL_Rect dst = { tx, cy, draw_w, draw_h };
-        SDL_RenderCopy(r, olv_memo_tex_, nullptr, &dst);
-        cy += draw_h + S(4);
-    }
-
-    // Body text -- white, medium font, truncated to card width
-    if (font_md_ && !body.empty()) {
-        update_label(lc_olv_body_, r, font_md_, body.c_str(), Theme::TEXT, mw);
-        draw_label(r, lc_olv_body_, tx, cy);
     }
 }
 

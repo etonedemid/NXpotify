@@ -463,6 +463,13 @@ void AudioPipeline::decode_thread_fn() {
     if (vf_open_) { ov_clear(&vf_); vf_open_ = false; }
     playing_.store(false);
 
+    // Clear decode_thread_ before firing callbacks so that any subsequent
+    // audio_->stop() call (triggered indirectly by the callbacks) does not
+    // pthread_join() this thread from another thread while we are still
+    // running -- that is undefined behaviour on NX/Switch libc.
+    // We use atomic exchange so stop() racing here sees 0 and skips the join.
+    decode_thread_ = 0;
+
     if (!stop_flag_.load()) {
         if (ctx.chunk_failed) {
             if (on_fetch_error) on_fetch_error();
@@ -567,9 +574,15 @@ void AudioPipeline::seek(int pos_ms) {
 }
 
 void AudioPipeline::stop() {
+    // Serialize concurrent stop() calls (e.g. on_play from dealer thread racing
+    // with play() called from the AES-key handler).
     stop_flag_.store(true);
     paused_.store(false);
-    if (decode_thread_) { pthread_join(decode_thread_, nullptr); decode_thread_ = 0; }
+    // Swap decode_thread_ with 0 so we never join twice even if stop() is
+    // re-entered or decode_thread_fn zeroed it first.
+    pthread_t thr = decode_thread_;
+    decode_thread_ = 0;
+    if (thr) { pthread_join(thr, nullptr); }
     if (vf_open_) { ov_clear(&vf_); vf_open_ = false; }
     playing_.store(false);
     stop_flag_.store(false);

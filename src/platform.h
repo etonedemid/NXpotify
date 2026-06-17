@@ -9,8 +9,8 @@
 #include <switch.h>
 
 // ── Logging ───────────────────────────────────────────────────────────────────
-// WHBLogPrint(msg)       → PLAT_LOG(msg)
-// WHBLogPrintf(fmt, ...) → PLAT_LOGF(fmt, ...)
+// print(msg)       → PLAT_LOG(msg)
+// printf(fmt, ...) → PLAT_LOGF(fmt, ...)
 #define PLAT_LOG(msg)        (printf("%s\n", (msg)))
 #define PLAT_LOGF(fmt, ...)  (printf(fmt "\n", ##__VA_ARGS__))
 

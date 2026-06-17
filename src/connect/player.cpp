@@ -430,7 +430,6 @@ void Player::on_credentials(Discovery::Credentials creds) {
     scb.on_became_inactive = [this] {
         audio_->stop();
         spirc_playing_ = false;
-        display_.set_olv_post(nullptr);
         display_.set_waiting();
     };
     scb.on_track_changed = [this](const std::string &t,
@@ -565,7 +564,6 @@ void Player::on_track_changed(const std::string &title, const std::string &artis
     isrc_           = isrc;
     track_explicit_ = is_explicit;
     display_.set_track(title, artist, art_url, is_explicit);
-    display_.set_olv_post(nullptr);
 }
 
 // ── Switch controller buttons ─────────────────────────────────────────────────
