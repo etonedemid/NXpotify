@@ -44,14 +44,9 @@ public:
     void set_audio(Connect::AudioPipeline *audio);  // non-owning; must outlive Display
     void set_handheld(bool handheld);  // call each frame; switches layout
 
-    // ── Roséverse OLV post card ──────────────────────────────────────────────
-    struct OLVPost {
-        std::string          body;
-        std::string          screen_name;
-        int                  feeling = 0;  // 0-5
-        std::vector<uint8_t> memo;         // raw TGA 320×120 BGRA from lower-left; empty = text-only
-    };
-
+    // Returns true if the tap was consumed by the settings UI.
+    // Call before normal swipe/button logic in handle_touch().
+    bool handle_tap(int x, int y);
 
     // ── cached text label ────────────────────────────────────────────────────
     // Texture is recreated only when str or col changes. max_w=-1 means
@@ -72,6 +67,9 @@ private:
     void render_login(SDL_Renderer *r, int w, int h);
     void render_playing(SDL_Renderer *r, int w, int h, bool handheld = false);
     void render_controls(SDL_Renderer *r, int w, int h);
+    void render_settings(SDL_Renderer *r, int w, int h);
+    void load_settings();
+    void save_settings();
 
 
     // Ensure lbl holds an up-to-date texture for (text, col, max_w).
@@ -140,6 +138,12 @@ private:
     int         crystal_strength_ = 5;
     bool        controls_         = false;
     bool        handheld_         = false;
+
+    // ── settings (main-thread only, no mutex needed) ──────────────────────────
+    bool      settings_open_ = false;
+    int       layout_idx_    = 0;
+    int       color_preset_  = 0;   
+    SDL_Color art_dominant_  = {180, 180, 180, 255};
 
     // ── spectrum visualizer ───────────────────────────────────────────────────
     Connect::AudioPipeline *audio_src_ = nullptr;

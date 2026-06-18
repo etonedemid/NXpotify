@@ -18,7 +18,7 @@
 
 #include <curl/curl.h>
 
-
+#include "cJSON/cJSON.h"
 #include "platform.h"
 
 namespace UI {
@@ -110,6 +110,7 @@ bool Display::init(const char *font_path) {
       pthread_create(&spec_thread_, &a, [](void *v) -> void* { static_cast<Display*>(v)->spec_worker(); return nullptr; }, this);
       pthread_attr_destroy(&a); }
 
+    load_settings();
     PLAT_LOG("display: OK");
     return true;
 }
@@ -248,6 +249,32 @@ void Display::render() {
                 art_pending_data_.data(), (int)art_pending_data_.size(),
                 &iw, &ih, &ch, 4);
             if (px) {
+                // Extract dominant color: scan ~1500 samples, pick most saturated non-dark pixel
+                {
+                    SDL_Color dominant = {180, 180, 180, 255};
+                    float best_sat = 0.18f;
+                    int total = iw * ih;
+                    int step = std::max(1, total / 1500);
+                    for (int i = 0; i < total; i += step) {
+                        float rr = px[i*4+0] / 255.0f;
+                        float gg = px[i*4+1] / 255.0f;
+                        float bb = px[i*4+2] / 255.0f;
+                        float mx = std::max({rr, gg, bb});
+                        float mn = std::min({rr, gg, bb});
+                        float sat = (mx > 0.05f) ? (mx - mn) / mx : 0.0f;
+                        if (sat > best_sat && mx > 0.22f && mx < 0.93f) {
+                            best_sat = sat;
+                            float sc = 0.72f / mx;
+                            dominant = {
+                                (uint8_t)(std::min(1.0f, rr*sc) * 255),
+                                (uint8_t)(std::min(1.0f, gg*sc) * 255),
+                                (uint8_t)(std::min(1.0f, bb*sc) * 255),
+                                255
+                            };
+                        }
+                    }
+                    art_dominant_ = dominant;
+                }
                 SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
                     px, iw, ih, 32, iw * 4, SDL_PIXELFORMAT_RGBA32);
                 if (surf) {
@@ -412,10 +439,10 @@ void Display::render_to(SDL_Renderer *r, int w, int h) {
         SDL_RenderClear(r);
     }
 
-    if      (snap_login)    render_login(r, w, h);
+    if      (snap_login)    { settings_open_ = false; render_login(r, w, h); }
     else if (snap_controls) render_controls(r, w, h);
     else if (snap_waiting)  render_waiting(r, w, h, snap_connecting);
-    else                    render_playing(r, w, h, snap_handheld);
+    else                    { settings_open_ = false; render_playing(r, w, h, snap_handheld); }
 }
 
 void Display::render_login(SDL_Renderer *r, int w, int h) {
@@ -482,6 +509,46 @@ void Display::render_waiting(SDL_Renderer *r, int w, int h, bool connecting) {
     }
     draw_label(r, lc_wait_[0], 0, h / 2 - 14, w / 2);
     draw_label(r, lc_wait_[1], 0, h / 2 + 16, w / 2);
+
+    // Gear icon (settings button) -- top-right corner
+    float s = w / 1280.0f;
+    auto S = [&](int v) { return (int)(v * s); };
+    int gcx = w - S(50), gcy = S(40), gR = S(22);
+    SDL_Color gc = settings_open_ ? Theme::TEXT : Theme::TEXT_HINT;
+    // subtle dark backdrop
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 0, 0, 0, 70);
+    int brad = gR + S(6);
+    for (int dy = -brad; dy <= brad; dy++) {
+        float f2 = (float)(brad*brad - dy*dy);
+        int dx = (f2 > 0) ? (int)sqrtf(f2) : 0;
+        SDL_RenderDrawLine(r, gcx-dx, gcy+dy, gcx+dx, gcy+dy);
+    }
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+    // gear body (outer ring + teeth)
+    SDL_SetRenderDrawColor(r, gc.r, gc.g, gc.b, 255);
+    int t    = std::max(2, gR * 5 / 12);
+    int body = gR - t / 3;
+    int hole = std::max(1, gR * 2 / 5);
+    static const float GD[8][2] = {
+        {1,0},{0.707f,0.707f},{0,1},{-0.707f,0.707f},
+        {-1,0},{-0.707f,-0.707f},{0,-1},{0.707f,-0.707f}
+    };
+    for (const auto &d : GD) {
+        SDL_Rect tooth = { gcx+(int)(d[0]*gR)-t/2, gcy+(int)(d[1]*gR)-t/2, t, t };
+        SDL_RenderFillRect(r, &tooth);
+    }
+    for (int dy = -body; dy <= body; dy++) {
+        int dx = (int)sqrtf((float)(body*body - dy*dy));
+        SDL_RenderDrawLine(r, gcx-dx, gcy+dy, gcx+dx, gcy+dy);
+    }
+    SDL_SetRenderDrawColor(r, 28, 32, 28, 255);
+    for (int dy = -hole; dy <= hole; dy++) {
+        int dx = (int)sqrtf((float)(hole*hole - dy*dy));
+        SDL_RenderDrawLine(r, gcx-dx, gcy+dy, gcx+dx, gcy+dy);
+    }
+
+    if (settings_open_) render_settings(r, w, h);
 }
 
 void Display::render_controls(SDL_Renderer *r, int w, int h) {
@@ -508,8 +575,6 @@ void Display::render_controls(SDL_Renderer *r, int w, int h) {
         { "Y",           "Repeat"                      },
         { "Up / Down",   "Crystalizer On / Off"        },
         { "Left / Right","Crystalizer Strength"        },
-        { "Stick R",     "Open post in Roséverse"       },
-        { "Stick L",     "Post to Roséverse"           },
         { "B",           "This screen"                 },
     };
     static constexpr Row wiimote[] = {
@@ -529,7 +594,7 @@ void Display::render_controls(SDL_Renderer *r, int w, int h) {
 
     for (int col = 0; col < 2; ++col) {
         const Row *rows = (col == 0) ? gamepad : wiimote;
-        int nrows = (col == 0) ? 12 : 8;
+        int nrows = (col == 0) ? 10 : 8;
         int x = col_x[col];
         for (int i = 0; i < nrows; ++i) {
             int y = top_y + i * row_h;
@@ -560,6 +625,166 @@ void Display::render_controls(SDL_Renderer *r, int w, int h) {
     draw_centered(r, font_sm_, "Press B to close", Theme::TEXT_HINT, w / 2, h - S(40));
 }
 
+void Display::render_settings(SDL_Renderer *r, int w, int h) {
+    float s = w / 1280.0f;
+    auto S = [&](int v) { return (int)(v * s); };
+
+    // Dim entire screen
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 0, 0, 0, 190);
+    SDL_Rect full = {0, 0, w, h};
+    SDL_RenderFillRect(r, &full);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+
+    // Panel
+    int px = S(240), py = S(120), pw = S(800), ph = S(420);
+    fill_rounded(r, px, py, pw, ph, S(12), SDL_Color{32, 36, 32, 255});
+
+    // Title
+    draw_centered(r, font_lg_, "Settings", Theme::TEXT, w / 2, py + S(22));
+
+    // Divider
+    SDL_SetRenderDrawColor(r, 55, 58, 55, 255);
+    SDL_Rect div = {px + S(20), py + S(62), pw - S(40), 1};
+    SDL_RenderFillRect(r, &div);
+
+    // -- Layout section --
+    draw_clipped(r, font_sm_, "Layout", Theme::TEXT_DIM, px + S(30), py + S(78), S(200));
+
+    int btn_w = S(220), btn_h = S(46), btn_y = py + S(108);
+    int btn_x0 = px + (pw - S(3*220 + 2*20)) / 2;
+    for (int i = 0; i < Theme::LAYOUT_COUNT; i++) {
+        int bx = btn_x0 + i * (S(220) + S(20));
+        bool active = (layout_idx_ == i);
+        SDL_Color bg = active ? Theme::ACCENT : SDL_Color{55, 58, 55, 255};
+        SDL_Color tc = active ? SDL_Color{20, 20, 20, 255} : Theme::TEXT_DIM;
+        fill_rounded(r, bx, btn_y, btn_w, btn_h, S(6), bg);
+        draw_centered(r, font_md_, Theme::LAYOUTS[i].name, tc,
+                      bx + btn_w / 2, btn_y + (btn_h - S(22)) / 2);
+    }
+
+    // -- Color section --
+    SDL_SetRenderDrawColor(r, 55, 58, 55, 255);
+    SDL_Rect div2 = {px + S(20), py + S(176), pw - S(40), 1};
+    SDL_RenderFillRect(r, &div2);
+    draw_clipped(r, font_sm_, "Accent Color", Theme::TEXT_DIM, px + S(30), py + S(188), S(200));
+
+    // 6 swatches (5 presets + art color), centered in panel
+    int sw = S(40), sg = S(14);
+    int sw_total = 6 * sw + 5 * sg;
+    int sw_x0 = px + (pw - sw_total) / 2;
+    int sw_y  = py + S(216);
+
+    for (int i = 0; i < 6; i++) {
+        int sx = sw_x0 + i * (sw + sg);
+        bool active = (color_preset_ == i);
+        SDL_Color col = (i < 5) ? Theme::COLOR_PRESETS[i] : art_dominant_;
+        fill_rounded(r, sx, sw_y, sw, sw, S(5), col);
+        if (i == 5) {
+            draw_centered(r, font_sm_, "Art",
+                          SDL_Color{255, 255, 255, 200},
+                          sx + sw / 2, sw_y + (sw - S(16)) / 2);
+        }
+        if (active) {
+            SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+            SDL_Rect b1 = {sx - S(3), sw_y - S(3), sw + S(6), sw + S(6)};
+            SDL_Rect b2 = {sx - S(2), sw_y - S(2), sw + S(4), sw + S(4)};
+            SDL_RenderDrawRect(r, &b1);
+            SDL_RenderDrawRect(r, &b2);
+        }
+    }
+
+    // Footer
+    draw_centered(r, font_sm_, "Tap outside panel to close", Theme::TEXT_HINT,
+                  w / 2, py + ph - S(24));
+}
+
+bool Display::handle_tap(int x, int y) {
+    // Only active on waiting screen
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!waiting_ || login_) return false;
+    }
+
+    if (!settings_open_) {
+        // Gear icon hit box: cx=w-50, cy=40, radius~28 (generous touch area)
+        int gcx = 1230, gcy = 40, gHit = 30;
+        if (std::abs(x - gcx) <= gHit && std::abs(y - gcy) <= gHit) {
+            settings_open_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    // Panel bounds
+    int px = 240, py = 120, pw = 800, ph = 420;
+    // Outside panel = close
+    if (x < px || x > px+pw || y < py || y > py+ph) {
+        settings_open_ = false;
+        save_settings();
+        return true;
+    }
+
+    // Layout buttons
+    int btn_w = 220, btn_h = 46, btn_y = py + 108;
+    int btn_x0 = px + (pw - (3*220 + 2*20)) / 2;
+    for (int i = 0; i < Theme::LAYOUT_COUNT; i++) {
+        int bx = btn_x0 + i * (220 + 20);
+        if (x >= bx && x <= bx+btn_w && y >= btn_y && y <= btn_y+btn_h) {
+            layout_idx_ = i;
+            save_settings();
+            return true;
+        }
+    }
+
+    // Color swatches
+    int sw = 40, sg = 14;
+    int sw_total = 6*sw + 5*sg;
+    int sw_x0 = px + (pw - sw_total) / 2;
+    int sw_y  = py + 216;
+    for (int i = 0; i < 6; i++) {
+        int sx = sw_x0 + i * (sw + sg);
+        if (x >= sx && x <= sx+sw && y >= sw_y && y <= sw_y+sw) {
+            color_preset_ = i;
+            save_settings();
+            return true;
+        }
+    }
+
+    return true;  // consumed by panel
+}
+
+void Display::load_settings() {
+    FILE *f = fopen(SD_ROOT "/switch/nxpotify/ui_config.json", "r");
+    if (!f) return;
+    char buf[128];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) return;
+    cJSON *lj = cJSON_GetObjectItem(root, "layout");
+    if (cJSON_IsNumber(lj)) {
+        int v = (int)lj->valuedouble;
+        if (v >= 0 && v < Theme::LAYOUT_COUNT) layout_idx_ = v;
+    }
+    cJSON *cj = cJSON_GetObjectItem(root, "color");
+    if (cJSON_IsNumber(cj)) {
+        int v = (int)cj->valuedouble;
+        if (v >= 0 && v <= 5) color_preset_ = v;
+    }
+    cJSON_Delete(root);
+}
+
+void Display::save_settings() {
+    FILE *f = fopen(SD_ROOT "/switch/nxpotify/ui_config.json", "w");
+    if (!f) return;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"layout\":%d,\"color\":%d}\n", layout_idx_, color_preset_);
+    fwrite(buf, 1, strlen(buf), f);
+    fclose(f);
+}
+
 void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
     std::string title, artist;
     int pos_ms, dur_ms, volume;
@@ -582,11 +807,17 @@ void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
         is_explicit = explicit_;
     }
 
+    // Active layout and accent color (main-thread state, no lock needed)
+    const Theme::Layout &lay = Theme::LAYOUTS[layout_idx_];
+    SDL_Color active_accent = (color_preset_ == 5)
+        ? art_dominant_
+        : Theme::COLOR_PRESETS[color_preset_];
+
     float s = w / 1280.0f;
     auto S  = [&](int v) { return (int)(v * s); };
 
     // ── Album art ─────────────────────────────────────────────────────────────
-    int ax = S(Theme::ART_X), ay = S(Theme::ART_Y), asz = S(Theme::ART_SIZE);
+    int ax = S(lay.art_x), ay = S(lay.art_y), asz = S(lay.art_size);
     if (art) {
         SDL_Rect dst = {ax, ay, asz, asz};
         SDL_RenderCopy(r, art, nullptr, &dst);
@@ -600,7 +831,7 @@ void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
     }
 
     // ── Track info: artist (small/dim) above title (large/white) ─────────────
-    int tx = S(Theme::TEXT_X);
+    int tx = S(lay.art_x + lay.art_size + 40);
     int tlabel_w = w - tx - S(40);
     update_label(lc_artist_, r, font_lg_,    artist.c_str(), Theme::TEXT_DIM, tlabel_w);
     update_label(lc_title_,  r, font_title_, title.c_str(),  Theme::TEXT,     tlabel_w);
@@ -658,7 +889,7 @@ void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
     fill_rounded(r, bx, by_bar, bw, bh, bh / 2, Theme::BAR_BG);
     if (dur_ms > 0) {
         int filled = (int)((int64_t)pos_ms * bw / dur_ms);
-        fill_rounded(r, bx, by_bar, std::min(filled, bw), bh, bh / 2, Theme::ACCENT);
+        fill_rounded(r, bx, by_bar, std::min(filled, bw), bh, bh / 2, active_accent);
     }
 
     char t_pos[16], t_dur[16];
@@ -674,7 +905,7 @@ void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
 
     // ── Transport controls (drawn icons centered below bar) ───────────────────
     {
-        const SDL_Color &ac = Theme::ACCENT;
+        const SDL_Color &ac = active_accent;
         SDL_SetRenderDrawColor(r, ac.r, ac.g, ac.b, 255);
         int cy    = S(Theme::TRANSPORT_Y);
         int cx    = w / 2;
@@ -733,12 +964,12 @@ void Display::render_playing(SDL_Renderer *r, int w, int h, bool handheld) {
 
     // ── Status row: SHUF / REP / VOL / XTAL centered at STATUS_Y ────────────
     {
-        SDL_Color shuf_col = shuffle     ? Theme::ACCENT : Theme::TEXT_HINT;
-        SDL_Color rep_col  = repeat_mode ? Theme::ACCENT : Theme::TEXT_HINT;
+        SDL_Color shuf_col = shuffle     ? active_accent : Theme::TEXT_HINT;
+        SDL_Color rep_col  = repeat_mode ? active_accent : Theme::TEXT_HINT;
         char xtal_buf[12];
         if (xtal_on) snprintf(xtal_buf, sizeof(xtal_buf), "XTAL %d", xtal_str);
         else         snprintf(xtal_buf, sizeof(xtal_buf), "XTAL");
-        SDL_Color xtal_col = xtal_on ? Theme::ACCENT : Theme::TEXT_HINT;
+        SDL_Color xtal_col = xtal_on ? active_accent : Theme::TEXT_HINT;
         char vol_buf[12]; snprintf(vol_buf, sizeof(vol_buf), "VOL %d%%", volume);
 
         update_label(lc_shuf_, r, font_sm_, "SHUF", shuf_col);

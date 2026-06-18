@@ -1226,7 +1226,7 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
 
         int  seek_to      = 0;
         int  skip_idx     = 0;
-        std::string skip_uri;
+        std::string skip_uri, skip_uid;
         int  override_shuffle       = -1;
         int  override_repeat        = -1;
         int  override_repeat_track  = -1;
@@ -1234,11 +1234,18 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
             cJSON *sk = cJSON_GetObjectItem(opts_j, "seek_to");
             if (sk) seek_to = (int)sk->valuedouble;
             cJSON *st = cJSON_GetObjectItem(opts_j, "skip_to");
+            if (!st) st = cJSON_GetObjectItem(opts_j, "skipTo");
             if (cJSON_IsObject(st)) {
                 cJSON *tu = cJSON_GetObjectItem(st, "track_uri");
+                if (!tu) tu = cJSON_GetObjectItem(st, "trackUri");
                 if (cJSON_IsString(tu)) skip_uri = tu->valuestring;
                 cJSON *ti = cJSON_GetObjectItem(st, "track_index");
+                if (!ti) ti = cJSON_GetObjectItem(st, "trackIndex");
                 if (ti) skip_idx = (int)ti->valuedouble;
+                // Also capture UID for fallback lookup when track_uri is absent
+                cJSON *tuid = cJSON_GetObjectItem(st, "track_uid");
+                if (!tuid) tuid = cJSON_GetObjectItem(st, "trackUid");
+                if (cJSON_IsString(tuid)) skip_uid = tuid->valuestring;
             }
             cJSON *po = cJSON_GetObjectItem(opts_j, "player_options_override");
             if (cJSON_IsString(po)) {
@@ -1286,6 +1293,12 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         int target_idx = 0;
 
         if (!uris.empty()) {
+            if (target_uri.empty() && !skip_uid.empty()) {
+                // No URI but have a UID -- Spotify sends camelCase trackUid, find by UID
+                for (int i = 0; i < (int)uids.size(); i++) {
+                    if (uids[i] == skip_uid) { target_idx = i; target_uri = uris[i]; break; }
+                }
+            }
             if (target_uri.empty()) {
                 // No specific URI -- use skip_idx clamped to list size
                 target_idx = std::min(skip_idx, (int)uris.size() - 1);
@@ -1324,53 +1337,19 @@ bool Spirc::handle_dealer_request(const std::string & /*message_ident*/,
         context_uri_       = ctx_uri;
         current_track_uri_ = target_uri;
 
-        // abs_track_idx_ is the authoritative absolute position in the Spotify context.
-        // playing_track_idx_ must always equal abs_track_idx_ so that indexing into
-        // track_uris_[] gives the right track and prev/next windows are correct.
-        // We pad track_uris_[] with empty strings so track_uris_[skip_idx] == target_uri.
-        abs_track_idx_ = (uint32_t)skip_idx;
-
         if (!uris.empty()) {
-            // Determine where the inline window sits in the full playlist.
-            // We know target_uri is at absolute position skip_idx.
-            // Find target_uri in the window to compute window_offset (abs index of uris[0]).
-            int window_offset = skip_idx;  // fallback: assume window starts at target
-            for (int i = 0; i < (int)uris.size(); i++) {
-                if (uris[i] == target_uri) {
-                    window_offset = skip_idx - i;
-                    break;
-                }
-            }
-            if (window_offset < 0) window_offset = 0;
-
-            // Build padded list: empty slots [0..window_offset-1], then the window.
-            // This keeps playing_track_idx_ == abs_track_idx_.
-            int total = window_offset + (int)uris.size();
-            // If skip_idx falls beyond window end (URI not in window), extend further.
-            if (skip_idx >= total) total = skip_idx + 1;
-            track_uris_.assign(total, "");
-            track_uids_.assign(total, "");
-            track_gids_.assign(total, {});
-            for (int i = 0; i < (int)uris.size(); i++) {
-                int abs_i = window_offset + i;
-                if (abs_i < total) {
-                    track_uris_[abs_i] = uris[i];
-                    track_uids_[abs_i] = (i < (int)uids.size()) ? uids[i] : "";
-                }
-            }
-            // Ensure the target slot is always populated.
-            track_uris_[skip_idx] = target_uri;
-            if (gid.size() == 16) track_gids_[skip_idx] = gid;
+            track_uris_ = uris;
+            track_uids_ = uids;
+            track_uids_.resize(uris.size());
+            track_gids_.assign(uris.size(), {});
+            if (gid.size() == 16) track_gids_[target_idx] = gid;
         } else {
-            // No inline list: sparse list with just the target.
-            track_uris_.assign(skip_idx + 1, "");
-            track_uids_.assign(skip_idx + 1, "");
-            track_gids_.assign(skip_idx + 1, {});
-            track_uris_[skip_idx] = target_uri;
-            if (gid.size() == 16) track_gids_[skip_idx] = gid;
+            track_uris_ = {target_uri};
+            track_uids_ = {""};
+            track_gids_ = {gid};
         }
-        // playing_track_idx_ always mirrors abs_track_idx_ after padding above.
-        playing_track_idx_ = abs_track_idx_;
+        playing_track_idx_ = target_idx;
+        abs_track_idx_     = (uint32_t)target_idx;
         playing_           = true;
         pos_ms_            = seek_to;
         duration_ms_       = 0;
@@ -2397,48 +2376,82 @@ static std::string page_url_to_spotify_uri(const std::string &url) {
     return "spotify:" + type + ":" + id;
 }
 
-static void parse_context_body(
-        const std::vector<uint8_t> &body,
-        std::vector<std::string>            &out_uris,
-        std::vector<std::vector<uint8_t>>   &out_gids,
-        std::vector<std::string>            &out_uids,
-        std::vector<std::string>            &out_page_urls)
-{
-    PRd rd{body.data(), body.data() + body.size()};
-    uint32_t f; uint8_t w;
-    while (rd.next(f, w)) {
-        if (f == 5 && w == 2) {  // ContextPage
-            PRd page; rd.enter(page);
-            std::string page_url;
-            std::vector<std::string>           pu;
-            std::vector<std::vector<uint8_t>>  pg;
-            std::vector<std::string>           pid;
-            while (page.next(f, w)) {
-                if (f == 1 && w == 2) {
-                    page.read_str(page_url);
-                } else if (f == 4 && w == 2) { // ContextTrack
-                    PRd tk; page.enter(tk);
-                    std::string uri, uid; std::vector<uint8_t> gid;
-                    while (tk.next(f, w)) {
-                        if      (f == 1 && w == 2) tk.read_str(uri);
-                        else if (f == 2 && w == 2) tk.read_bytes(gid);
-                        else if (f == 3 && w == 2) tk.read_str(uid);
-                        else                        tk.skip(w);
-                    }
-                    if (!uri.empty()) { pu.push_back(uri); pg.push_back(gid); pid.push_back(uid); }
-                } else page.skip(w);
-            }
-            if (!pu.empty()) {
-                for (size_t j = 0; j < pu.size(); j++) {
-                    out_uris.push_back(pu[j]);
-                    out_gids.push_back(j < pg.size()  ? pg[j]  : std::vector<uint8_t>{});
-                    out_uids.push_back(j < pid.size() ? pid[j] : "");
-                }
-            } else if (!page_url.empty()) {
-                out_page_urls.push_back(page_url);
-            }
-        } else rd.skip(w);
+
+// HTTPS GET to spclient; returns response body as string, empty on failure.
+std::string Spirc::spclient_get_str(const std::string &path) {
+    std::string atk;
+    { std::lock_guard<std::mutex> lk(token_mu_); atk = access_token_; }
+    if (atk.empty()) {
+        atk = get_access_token(username_, ap_->reusable_creds(), device_id_);
+        if (atk.empty()) return {};
+        std::lock_guard<std::mutex> lk(token_mu_);
+        access_token_ = atk;
     }
+    std::string host;
+    {
+        std::lock_guard<std::mutex> lk(spclient_mu_);
+        if (spclient_host_.empty()) {
+            spclient_host_ = resolve_spclient_host();
+            if (spclient_host_.empty()) spclient_host_ = "gew4-spclient.spotify.com";
+        }
+        host = spclient_host_;
+    }
+    std::string url      = "https://" + host + path;
+    std::string auth_hdr = "Authorization: Bearer " + atk;
+    std::string body;
+    CURL *curl = curl_easy_init();
+    if (!curl) return {};
+    struct curl_slist *hdrs = nullptr;
+    hdrs = curl_slist_append(hdrs, auth_hdr.c_str());
+    curl_easy_setopt(curl, CURLOPT_URL,          url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER,   hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+        +[](char *p, size_t s, size_t n, void *ud) -> size_t {
+            static_cast<std::string *>(ud)->append(p, s * n); return s * n;
+        });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,    &body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,      10L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_perform(curl);
+    long code = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(hdrs); curl_easy_cleanup(curl);
+    PLAT_LOGF("spirc: spclient GET %s -> HTTP %ld body=%zu", path.c_str(), code, body.size());
+    return (code == 200) ? body : std::string{};
+}
+
+// Parse a context JSON body (proto-JSON format from spclient /context-resolve/v1/).
+// Appends to out_uris/out_uids and out_page_urls for deferred pages.
+static void parse_context_json(const std::string &json,
+                                std::vector<std::string> &out_uris,
+                                std::vector<std::string> &out_uids,
+                                std::vector<std::string> &out_page_urls) {
+    cJSON *ctx = cJSON_ParseWithLength(json.c_str(), json.size());
+    if (!ctx) return;
+    cJSON *pages = cJSON_GetObjectItem(ctx, "pages");
+    if (cJSON_IsArray(pages)) {
+        int np = cJSON_GetArraySize(pages);
+        for (int pi = 0; pi < np; pi++) {
+            cJSON *pg  = cJSON_GetArrayItem(pages, pi);
+            cJSON *pu  = cJSON_GetObjectItem(pg, "pageUrl");
+            cJSON *tks = cJSON_GetObjectItem(pg, "tracks");
+            if (cJSON_IsArray(tks)) {
+                int nt = cJSON_GetArraySize(tks);
+                for (int ti = 0; ti < nt; ti++) {
+                    cJSON *t  = cJSON_GetArrayItem(tks, ti);
+                    cJSON *u  = t ? cJSON_GetObjectItem(t, "uri") : nullptr;
+                    cJSON *id = t ? cJSON_GetObjectItem(t, "uid") : nullptr;
+                    if (cJSON_IsString(u)) {
+                        out_uris.push_back(u->valuestring);
+                        out_uids.push_back(cJSON_IsString(id) ? id->valuestring : "");
+                    }
+                }
+            } else if (cJSON_IsString(pu)) {
+                out_page_urls.push_back(pu->valuestring);
+            }
+        }
+    }
+    cJSON_Delete(ctx);
 }
 
 void Spirc::fetch_context_tracks(const std::string &context_uri,
@@ -2450,148 +2463,87 @@ void Spirc::fetch_context_tracks(const std::string &context_uri,
         context_uri.compare(0, 20, "spotify:collection:") != 0)
         return;
 
-    std::string muri = "hm://context-resolve/v1/" + context_uri;
-    mercury_get(muri, [this, context_uri, current_uri](bool ok,
-                std::vector<std::vector<uint8_t>> parts) {
-        if (!ok || parts.size() < 2 || parts[1].empty()) {
-            PLAT_LOGF("spirc: ctx_resolve failed ok=%d parts=%zu", (int)ok, parts.size());
-            return;
+    struct Ctx { Spirc *self; std::string ctx_uri; std::string cur_uri; };
+    auto *c = new Ctx{this, context_uri, current_uri};
+    pthread_t pth; pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&pth, &attr, [](void *vp) -> void * {
+        auto *c = static_cast<Ctx *>(vp);
+        std::string body = c->self->spclient_get_str("/context-resolve/v1/" + c->ctx_uri);
+        if (body.empty()) {
+            PLAT_LOGF("spirc: ctx_resolve failed for '%s'", c->ctx_uri.c_str());
+            delete c; return nullptr;
         }
-        // FIX: Stale check uses the snapshot of current_uri captured at fire time,
-        // not current_track_uri_ which may have changed by the time we respond.
-        // If the context changed, drop entirely.
-        if (context_uri_ != context_uri) return;
+        if (c->self->context_uri_ != c->ctx_uri ||
+            c->self->current_track_uri_ != c->cur_uri) { delete c; return nullptr; }
 
-        std::vector<std::string>          uris;
-        std::vector<std::vector<uint8_t>> gids;
-        std::vector<std::string>          uids;
-        std::vector<std::string>          page_urls;
-        parse_context_body(parts[1], uris, gids, uids, page_urls);
+        std::vector<std::string> uris, uids, page_urls;
+        parse_context_json(body, uris, uids, page_urls);
+        PLAT_LOGF("spirc: ctx_resolve: %zu tracks %zu deferred_pages",
+                     uris.size(), page_urls.size());
 
-        if (uris.empty()) {
-            PLAT_LOGF("spirc: ctx_resolve: no inline tracks (page_urls=%zu)", page_urls.size());
-        } else {
-            bool found = false;
-            size_t new_idx = 0;
+        if (!uris.empty()) {
+            bool found = false; size_t new_idx = 0;
             for (size_t k = 0; k < uris.size(); ++k) {
-                if (uris[k] == current_uri) { new_idx = k; found = true; break; }
+                if (uris[k] == c->cur_uri) { new_idx = k; found = true; break; }
             }
-
-            PLAT_LOGF("spirc: ctx_resolve: %zu tracks found=%d idx=%zu deferred_pages=%zu",
-                         uris.size(), (int)found, new_idx, page_urls.size());
-
-            if (found) {
-                // Only replace the track list if the current track is still the same
-                // as when we fired the request, to avoid clobbering a newer track load.
-                if (current_track_uri_ == current_uri) {
-                    // The full resolved list has track at new_idx. We must keep
-                    // playing_track_idx_ == abs_track_idx_ invariant. abs_track_idx_
-                    // was set by the play command (skip_idx) and is authoritative.
-                    // new_idx from the resolved list should equal abs_track_idx_;
-                    // if it differs, trust abs_track_idx_ and find the track there.
-                    track_uris_ = uris;
-                    track_gids_ = gids;
-                    track_uids_ = uids;
-                    // Extend list if abs_track_idx_ is beyond the resolved list
-                    // (shouldn't happen, but be safe).
-                    if (abs_track_idx_ >= track_uris_.size()) {
-                        track_uris_.resize(abs_track_idx_ + 1, "");
-                        track_gids_.resize(abs_track_idx_ + 1, {});
-                        track_uids_.resize(abs_track_idx_ + 1, "");
-                    }
-                    // Prefer abs_track_idx_ as ground truth; if new_idx disagrees,
-                    // log it but keep abs_track_idx_ (the play command knows better).
-                    if ((uint32_t)new_idx != abs_track_idx_) {
-                        PLAT_LOGF("spirc: ctx_resolve idx mismatch: resolved=%zu abs=%u, keeping abs",
-                                     new_idx, abs_track_idx_);
-                        // Make sure the target URI is at abs_track_idx_ in the full list
-                        track_uris_[abs_track_idx_] = current_uri;
-                    }
-                    playing_track_idx_ = abs_track_idx_;
-
-                    if (started_.load())
-                        put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
-                } else {
-                    PLAT_LOG("spirc: ctx_resolve: current track changed since request, dropping result");
-                }
+            if (found && c->self->context_uri_ == c->ctx_uri &&
+                c->self->current_track_uri_ == c->cur_uri) {
+                c->self->track_uris_        = uris;
+                c->self->track_gids_.assign(uris.size(), {});
+                c->self->track_uids_        = uids;
+                c->self->playing_track_idx_ = new_idx;
+                c->self->abs_track_idx_     = (uint32_t)new_idx;
+                if (c->self->started_.load())
+                    c->self->put_connect_state_async(4, c->self->playing_,
+                                                     c->self->pos_ms_, c->self->vol_pct_);
             } else {
-                PLAT_LOGF("spirc: ctx_resolve: current track not in first page, awaiting deferred pages");
+                PLAT_LOG("spirc: ctx_resolve: current track not in resolved list");
             }
         }
-
         for (const auto &pu : page_urls) {
             std::string resolved = page_url_to_spotify_uri(pu);
             if (!resolved.empty())
-                fetch_context_page(resolved, context_uri);
-            else
-                PLAT_LOGF("spirc: ctx_resolve: unrecognised page_url '%s'", pu.c_str());
+                c->self->fetch_context_page(resolved, c->ctx_uri);
         }
-    });
+        delete c; return nullptr;
+    }, c);
+    pthread_attr_destroy(&attr);
 }
 
 void Spirc::fetch_context_page(const std::string &page_ctx_uri,
                                  const std::string &context_uri) {
-    std::string muri = "hm://context-resolve/v1/" + page_ctx_uri;
-    mercury_get(muri, [this, page_ctx_uri, context_uri](bool ok,
-                std::vector<std::vector<uint8_t>> parts) {
-        if (!ok || parts.size() < 2 || parts[1].empty()) {
-            PLAT_LOGF("spirc: ctx_page '%s' failed", page_ctx_uri.c_str());
-            return;
-        }
-        if (context_uri_ != context_uri) return;
+    struct Ctx { Spirc *self; std::string page_uri; std::string ctx_uri; };
+    auto *c = new Ctx{this, page_ctx_uri, context_uri};
+    pthread_t pth; pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&pth, &attr, [](void *vp) -> void * {
+        auto *c = static_cast<Ctx *>(vp);
+        std::string body = c->self->spclient_get_str("/context-resolve/v1/" + c->page_uri);
+        if (body.empty() || c->self->context_uri_ != c->ctx_uri) { delete c; return nullptr; }
 
-        std::vector<std::string>          uris;
-        std::vector<std::vector<uint8_t>> gids;
-        std::vector<std::string>          uids;
-        std::vector<std::string>          more_urls;
-        parse_context_body(parts[1], uris, gids, uids, more_urls);
-
-        if (uris.empty()) {
-            PLAT_LOGF("spirc: ctx_page '%s': no tracks", page_ctx_uri.c_str());
-            return;
-        }
+        std::vector<std::string> uris, uids, more_urls;
+        parse_context_json(body, uris, uids, more_urls);
+        if (uris.empty()) { delete c; return nullptr; }
 
         PLAT_LOGF("spirc: ctx_page '%s': +%zu tracks (total now %zu)",
-                     page_ctx_uri.c_str(), uris.size(), track_uris_.size() + uris.size());
-
-        // Fill in sparse empty slots first (from padding done at play time),
-        // then append any genuinely new tracks. This preserves the invariant
-        // that track_uris_[playing_track_idx_] == current_track_uri_.
-        // Build a map of URI -> first empty slot index for filling sparse entries.
-        size_t fill_pos = 0;
-        for (size_t k = 0; k < uris.size(); k++) {
-            const std::string &u = uris[k];
-            if (u.empty()) continue;
-            // Check if this URI already exists at any non-empty position.
-            bool already_present = false;
-            for (size_t j = 0; j < track_uris_.size(); j++) {
-                if (track_uris_[j] == u) { already_present = true; break; }
-            }
-            if (already_present) continue;
-            // Find the next empty slot from fill_pos onwards, or append.
-            while (fill_pos < track_uris_.size() && !track_uris_[fill_pos].empty())
-                fill_pos++;
-            if (fill_pos < track_uris_.size()) {
-                track_uris_[fill_pos] = u;
-                track_gids_[fill_pos] = (k < gids.size()) ? gids[k] : std::vector<uint8_t>{};
-                track_uids_[fill_pos] = (k < uids.size()) ? uids[k] : "";
-                fill_pos++;
-            } else {
-                track_uris_.push_back(u);
-                track_gids_.push_back(k < gids.size() ? gids[k] : std::vector<uint8_t>{});
-                track_uids_.push_back(k < uids.size() ? uids[k] : "");
-            }
-        }
-
-        if (started_.load())
-            put_connect_state_async(4, playing_, pos_ms_, vol_pct_);
-
+                     c->page_uri.c_str(), uris.size(), c->self->track_uris_.size() + uris.size());
+        for (auto &u : uris) c->self->track_uris_.push_back(u);
+        c->self->track_gids_.resize(c->self->track_uris_.size());
+        for (auto &u : uids) c->self->track_uids_.push_back(u);
+        if (c->self->started_.load())
+            c->self->put_connect_state_async(4, c->self->playing_,
+                                             c->self->pos_ms_, c->self->vol_pct_);
         for (const auto &pu : more_urls) {
             std::string resolved = page_url_to_spotify_uri(pu);
             if (!resolved.empty())
-                fetch_context_page(resolved, context_uri);
+                c->self->fetch_context_page(resolved, c->ctx_uri);
         }
-    });
+        delete c; return nullptr;
+    }, c);
+    pthread_attr_destroy(&attr);
 }
 
 } // namespace Connect

@@ -159,7 +159,8 @@ private:
     void fetch_context_page(const std::string &page_ctx_uri,
                              const std::string &context_uri);
 
-    // ── spclient token acquisition (HTTP only, no AP Mercury) ────────────────
+    // ── spclient HTTP helpers ─────────────────────────────────────────────────
+    std::string spclient_get_str(const std::string &path);  // HTTPS GET, returns body
     std::string resolve_cdn_http(const std::vector<uint8_t> &file_id);
 
     // ── connect-state v1 (PutStateRequest over HTTP) ─────────────────────────

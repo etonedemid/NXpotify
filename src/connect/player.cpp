@@ -135,7 +135,7 @@ void Player::run() {
 
     // Switch pad init
     PadState pad;
-    padConfigureInput(1, HidNpadStyleTag_NpadFullKey);
+    padConfigureInput(1, HidNpadStyleSet_NpadFullCtrl);
     padInitializeDefault(&pad);
 
     PLAT_LOG("player: init display");
@@ -652,6 +652,16 @@ void Player::handle_touch() {
     hidGetTouchScreenStates(&ts, 1);
 
     if (ts.count == 0) {
+        if (touch_.active && !touch_.consumed) {
+            int dx = (int)touch_.cur_x - touch_.start_x;
+            int dy = (int)touch_.cur_y - touch_.start_y;
+            // Let settings panel consume taps first
+            if (std::abs(dx) < 30 && std::abs(dy) < 30 &&
+                display_.handle_tap(touch_.start_x, touch_.start_y)) {
+                touch_ = {};
+                return;
+            }
+        }
         if (touch_.active && !touch_.consumed && spirc_) {
             int dx = (int)touch_.cur_x - touch_.start_x;
             int dy = (int)touch_.cur_y - touch_.start_y;
