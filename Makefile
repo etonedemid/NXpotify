@@ -15,7 +15,7 @@ DATA        :=
 
 APP_TITLE   := NXpotify
 APP_AUTHOR  := etonedemid
-APP_VERSION := 1.3.3.7
+APP_VERSION := 2.0.0.0
 APP_ICON    := $(TOPDIR)/meta/icon.jpg
 
 include $(DEVKITPRO)/libnx/switch_rules
